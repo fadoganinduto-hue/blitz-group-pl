@@ -1,0 +1,5 @@
+# Pyrefly type-checker configuration
+# Tells Pyrefly to use the project's virtual environment so it can find
+# streamlit, plotly, pandas, and all other installed packages.
+
+python_interpreter = "venv/Scripts/python.exe"
