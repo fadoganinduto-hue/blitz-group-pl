@@ -76,7 +76,7 @@ def _disambiguate_depreciation(label: str, current_section: str) -> str:
     return label  # fallback if section is unclear
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=12)
 def parse_pl_sheet(raw: pd.DataFrame, entity: str) -> pd.DataFrame:
     """Parse a wide P&L summary/detail sheet into tidy long format (Entity, Metric, Month, Value)."""
     # Locate the header row (must contain "In IDR" somewhere)
@@ -142,7 +142,7 @@ def parse_pl_sheet(raw: pd.DataFrame, entity: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=12)
 def parse_ratios(raw: pd.DataFrame, entity: str) -> pd.DataFrame:
     """Parse ratio rows (Margin %, Growth %) from a P&L sheet into tidy long format."""
     header_row_idx: int | None = None
@@ -201,7 +201,7 @@ MASTER_NEEDED_COLS: list[str] = [
 ]
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=12)
 def parse_master(raw: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     """Parse the MASTER sheet (header on row 2) into a clean long DataFrame.
 
@@ -226,7 +226,7 @@ def parse_master(raw: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
 # WIP Margin by Stream sheet
 # ---------------------------------------------------------------------------
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=12)
 def parse_wip_margin(raw: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """Parse the WIP Margin by Stream sheet into section DataFrames keyed by section name.
 
@@ -310,7 +310,7 @@ def parse_wip_margin(raw: pd.DataFrame) -> dict[str, pd.DataFrame]:
 # TIE-OUT CHECK sheet
 # ---------------------------------------------------------------------------
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=12)
 def parse_tie_out(raw: pd.DataFrame) -> pd.DataFrame:
     """Parse the TIE-OUT CHECK sheet into a tidy DataFrame of reconciliation deltas."""
     records: list[dict] = []

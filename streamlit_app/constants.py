@@ -78,6 +78,46 @@ PREFERRED_TREND_METRICS: list[str] = [
     "NET PROFIT/LOSS (Before Tax)",
 ]
 
+# Metric sections for the consolidated tab section filter
+METRIC_SECTIONS: dict[str, list[str]] = {
+    "Revenue": [
+        "Total Gross Revenue",
+        "Net Revenue",
+        "Deliveries",
+        "Mobile Commerce",
+        "EV Leasing",
+        "COD & Others",
+        "Others",
+    ],
+    "COGS": [
+        "Total COGS",
+        "Gross Profit 1",
+        "Gross Profit 2",
+        "Courier Fees",
+        "Fulfillment Costs",
+        "Cost of Goods Sold",
+        "Depreciation (COGS)",
+    ],
+    "Operating Expenses": [
+        "Total Operating Expenses",
+        "Salaries",
+        "Office and Hub Rentals",
+        "Overheads",
+        "IT Software and Services",
+        "Marketing",
+        "Travel",
+        "Depreciation (OpEx)",
+        "Depreciation",
+        "Outsourced Services",
+    ],
+    "Profitability": [
+        "EBITDA",
+        "NET PROFIT/LOSS (Before Tax)",
+        "Net Profit/Loss",
+        "Operating Profit",
+    ],
+}
+
 # Metrics used for the waterfall chart (in order, sign convention: positive = value as-is)
 WATERFALL_STEPS: list[tuple[str, str]] = [
     # (metric_label_in_data, display_name)
@@ -104,33 +144,74 @@ OPEX_LINE_ITEMS: list[str] = [
 ]
 
 # ---------------------------------------------------------------------------
+# Blitz brand colour palette (centralized)
+# ---------------------------------------------------------------------------
+BLITZ_COLORS: dict[str, str] = {
+    "primary": "#00B9F2",
+    "primary_hover": "#018EDD",
+    "deep_blue": "#004EA9",
+    "light_blue": "#B2EDFF",
+    "pale_blue": "#D6F6FF",
+    "text_primary": "#1A1A1A",
+    "text_secondary": "#4D4D4D",
+    "black": "#000000",
+    "white": "#FFFFFF",
+    "off_white": "#FCFCFC",
+    "background": "#F8F8F8",
+    "border": "#E2E2E2",
+}
+
+# ---------------------------------------------------------------------------
 # Colour palette
 # ---------------------------------------------------------------------------
 ENTITY_COLORS: dict[str, str] = {
-    "Blitz": "#60A5FA",       # electric blue
-    "Borzo": "#F87171",       # coral red
-    "TheLorry": "#34D399",    # emerald green
-    "Consolidated": "#A78BFA", # violet
+    "Blitz": "#00B9F2",       # primary Blitz blue
+    "Borzo": "#018EDD",       # secondary blue
+    "TheLorry": "#004EA9",    # deep blue
+    "Consolidated": "#1A1A1A", # dark text
 }
 
 METRIC_COLOR_FAMILIES: dict[str, str] = {
-    "revenue": "#60A5FA",
-    "cost": "#F87171",
-    "profit": "#34D399",
-    "margin": "#FBBF24",
-    "ebitda": "#A78BFA",
+    "revenue": "#00B9F2",
+    "cost": "#004EA9",
+    "profit": "#018EDD",
+    "margin": "#B2EDFF",
+    "ebitda": "#1A1A1A",
 }
 
-# Matches chartCategoricalColors in config.toml
+# Fixed metric colours prevent the same financial measure from changing identity
+# between executive, entity, and consolidated views.
+METRIC_COLORS: dict[str, str] = {
+    "Total Gross Revenue": "#00B9F2",
+    "Gross Revenue": "#00B9F2",
+    "Net Revenue": "#018EDD",
+    "Total COGS": "#004EA9",
+    "COGS": "#004EA9",
+    "Gross Profit 1": "#018EDD",
+    "Gross Profit 2": "#018EDD",
+    "Gross Profit": "#018EDD",
+    "Total Operating Expenses": "#4D4D4D",
+    "Operating Expenses": "#4D4D4D",
+    "OpEx": "#4D4D4D",
+    "EBITDA": "#1A1A1A",
+    "NET PROFIT/LOSS (Before Tax)": "#004EA9",
+    "Net Profit": "#004EA9",
+    "Net Profit / Loss": "#004EA9",
+    "Gross Margin": "#00B9F2",
+    "EBITDA Margin": "#018EDD",
+    "Net Margin": "#004EA9",
+    "COGS %": "#004EA9",
+    "OpEx %": "#4D4D4D",
+}
+
+# Matches chartCategoricalColors in config.toml. Light tones remain reserved for
+# surfaces, so every plotted category remains legible on a white background.
 PLOTLY_COLOR_SEQUENCE: list[str] = [
-    "#60A5FA",  # blue
-    "#34D399",  # green
-    "#A78BFA",  # violet
-    "#F87171",  # red
-    "#FBBF24",  # yellow
-    "#38BDF8",  # sky
-    "#FB923C",  # orange
-    "#94A3B8",  # slate
+    "#00B9F2",  # primary Blitz blue
+    "#018EDD",  # secondary blue
+    "#004EA9",  # deep blue
+    "#1A1A1A",  # primary text
+    "#4D4D4D",  # secondary text
 ]
 
 # ---------------------------------------------------------------------------
@@ -150,13 +231,13 @@ def fmt_idr(value: float) -> str:
     abs_val = abs(value)
     for threshold, suffix, divisor in IDR_SUFFIX_THRESHOLDS:
         if abs_val >= threshold:
-            return f"Rp{value / divisor:,.1f}{suffix}"
-    return f"Rp{value:,.0f}"
+            return f"{'-' if value < 0 else ''}Rp{abs_val / divisor:,.1f}{suffix}"
+    return f"{'-' if value < 0 else ''}Rp{abs_val:,.0f}"
 
 
 def fmt_idr_full(value: float) -> str:
     """Return a full IDR string like 'Rp1,234,567,890'."""
-    return f"Rp{value:,.0f}"
+    return f"{'-' if value < 0 else ''}Rp{abs(value):,.0f}"
 
 
 # ---------------------------------------------------------------------------

@@ -1,14 +1,23 @@
-# Professional Financial Dashboard Theme
-# Power BI / Metabase-inspired dual theme
+# Blitz financial intelligence theme — one accessible, brand-consistent light mode.
 
 [theme]
-# Shared settings
+base = "light"
+primaryColor = "#018EDD"
+backgroundColor = "#F8F8F8"
+secondaryBackgroundColor = "#FFFFFF"
+codeBackgroundColor = "#FCFCFC"
+textColor = "#1A1A1A"
+linkColor = "#018EDD"
+codeTextColor = "#4D4D4D"
+borderColor = "#E2E2E2"
+dataframeBorderColor = "#E2E2E2"
+dataframeHeaderBackgroundColor = "#D6F6FF"
+
 showWidgetBorder = true
 showSidebarBorder = true
 baseRadius = "8px"
 buttonRadius = "8px"
 
-# Inter — the font Power BI and Metabase both use
 font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
 headingFont = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@600;700&display=swap"
 codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
@@ -19,69 +28,24 @@ headingFontSizes = ["30px", "22px", "18px", "16px", "14px", "12px"]
 headingFontWeights = [700, 600, 600, 600, 500, 500]
 linkUnderline = false
 
-# Financial semantic colours
-greenColor = "#34D399"
-redColor   = "#F87171"
-yellowColor = "#FBBF24"
-orangeColor = "#FB923C"
-blueColor   = "#60A5FA"
-violetColor = "#A78BFA"
-grayColor   = "#94A3B8"
+# Status colours are reserved for risk and exception states.
+greenColor = "#1A7F37"
+redColor = "#CF222E"
+yellowColor = "#BF8700"
+blueColor = "#00B9F2"
+grayColor = "#4D4D4D"
 
-# Chart colour palette (matches ENTITY_COLORS + PLOTLY_COLOR_SEQUENCE in constants.py)
-chartCategoricalColors = [
-    "#60A5FA",
-    "#34D399",
-    "#A78BFA",
-    "#F87171",
-    "#FBBF24",
-    "#38BDF8",
-    "#FB923C",
-    "#94A3B8",
-]
-
+# Categorical series stay readable on white; lighter brand tones are for surfaces.
+chartCategoricalColors = ["#00B9F2", "#018EDD", "#004EA9", "#1A1A1A", "#4D4D4D"]
 chartSequentialColors = [
-    "#0C4A6E", "#075985", "#0369A1", "#0284C7",
-    "#0EA5E9", "#38BDF8", "#7DD3FC", "#BAE6FD",
-    "#E0F2FE", "#F0F9FF",
+    "#D6F6FF", "#D6F6FF", "#B2EDFF", "#B2EDFF", "#B2EDFF",
+    "#00B9F2", "#00B9F2", "#018EDD", "#018EDD", "#004EA9",
 ]
 
-[theme.dark]
-primaryColor = "#60A5FA"             # Bright electric blue
-backgroundColor = "#0F172A"          # Deep navy (Power BI dark)
-secondaryBackgroundColor = "#1E293B" # Slate card background
-codeBackgroundColor = "#1E293B"
-textColor = "#F1F5F9"                # Crisp off-white text
-linkColor = "#60A5FA"
-codeTextColor = "#CBD5E1"
-borderColor = "#334155"              # Subtle slate border
-dataframeBorderColor = "#334155"
-dataframeHeaderBackgroundColor = "#1E293B"
-
-[theme.dark.sidebar]
-backgroundColor = "#0B1120"
-secondaryBackgroundColor = "#1E293B"
-codeBackgroundColor = "#1E293B"
-textColor = "#F1F5F9"
-borderColor = "#334155"
-primaryColor = "#60A5FA"
-
-[theme.light]
-primaryColor = "#0284C7"             # Deep blue
-backgroundColor = "#FFFFFF"          # Crisp white
-secondaryBackgroundColor = "#F8FAFC" # Very light slate
-codeBackgroundColor = "#F1F5F9"
-textColor = "#0F172A"                # Dark navy text
-linkColor = "#0284C7"
-codeTextColor = "#334155"
-borderColor = "#E2E8F0"              # Subtle light border
-dataframeBorderColor = "#E2E8F0"
-dataframeHeaderBackgroundColor = "#F8FAFC"
-
-[theme.light.sidebar]
-backgroundColor = "#F1F5F9"
-secondaryBackgroundColor = "#E2E8F0"
-codeBackgroundColor = "#E2E8F0"
-textColor = "#0F172A"
-borderColor = "#E2E8F0"
-primaryColor = "#0284C7"
+[theme.sidebar]
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#FCFCFC"
+codeBackgroundColor = "#FCFCFC"
+textColor = "#1A1A1A"
+borderColor = "#E2E2E2"
+primaryColor = "#018EDD"

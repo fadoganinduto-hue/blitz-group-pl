@@ -5,15 +5,31 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from streamlit_app.components.charts import comparison_bar_chart, stacked_area_chart, trend_line_chart
-from streamlit_app.components.filters import get_filtered_months, multiselect_with_all
+from streamlit_app.components.charts import (
+    comparison_bar_chart,
+    render_plotly_chart,
+    stacked_area_chart,
+    trend_line_chart,
+)
+from streamlit_app.components.filters import (
+    get_filtered_months,
+    render_active_filter_bar,
+    render_empty_state,
+    validate_data_not_empty,
+)
 from streamlit_app.components.kpi_cards import render_single_kpi
+from streamlit_app.components.ui import render_page_header, render_section_header, render_section_safe
 from streamlit_app.constants import fmt_idr
 from streamlit_app.data.parsers import parse_wip_margin
 
 
 def render(sheets: dict[str, pd.DataFrame]) -> None:
     """Render the Margin by Revenue Stream tab."""
+    render_page_header(
+        "Margin by stream",
+        "See which revenue streams are scaling profitably and where cost intensity needs attention.",
+        eyebrow="Profitability analysis",
+    )
     raw = sheets.get("WIP Margin by Stream")
     if raw is None:
         st.warning(":material/warning: 'WIP Margin by Stream' sheet not found in this workbook.")
@@ -33,40 +49,53 @@ def render(sheets: dict[str, pd.DataFrame]) -> None:
         all_months = revenue_df.drop_duplicates("Month").sort_values("MonthDate")["Month"].tolist()
 
     filtered_months = get_filtered_months(all_months) if all_months else all_months
+    if not filtered_months:
+        render_empty_state(
+            title="No months in the selected date range.",
+            suggestion="Adjust the month range slider in the sidebar to include at least one period.",
+            icon="📅",
+            show_reset=True,
+            key_suffix="margin",
+        )
+        return
+
+    render_active_filter_bar(filtered_months)
     cat_orders = {"Month": filtered_months}
 
-    # ---- Stream selector filter ----------------------------------------
-    if not revenue_df.empty:
-        all_streams = sorted(revenue_df["Stream"].dropna().unique())
-        selected_streams = multiselect_with_all("Revenue streams", all_streams, key="margin_stream_filter")
-        if selected_streams:
-            revenue_df = pd.DataFrame(revenue_df[revenue_df["Stream"].isin(selected_streams)])
-            if not cogs_df.empty:
-                cogs_df = pd.DataFrame(cogs_df[cogs_df["Stream"].isin(selected_streams)])
-            if not margin_df.empty:
-                margin_df = pd.DataFrame(margin_df[margin_df["Stream"].isin(selected_streams)])
+    # ---- Apply Global Stream Filter ------------------------------------
+    stream_f = st.session_state.get("stream_filter") or st.session_state.get("sidebar_stream_filter", [])
+    if stream_f and not revenue_df.empty:
+        revenue_df = pd.DataFrame(revenue_df[revenue_df["Stream"].isin(stream_f)])
+        if not cogs_df.empty:
+            cogs_df = pd.DataFrame(cogs_df[cogs_df["Stream"].isin(stream_f)])
+        if not margin_df.empty:
+            margin_df = pd.DataFrame(margin_df[margin_df["Stream"].isin(stream_f)])
 
     # ---- KPI cards — latest month per stream --------------------------
     _render_stream_kpis(revenue_df, filtered_months)
 
-    # ---- Stacked area / bar: revenue by stream -----------------------
+    # ──── Stacked area / bar: revenue by stream ────────────────────────────
     col_area, col_bar = st.columns(2, gap="medium")
     with col_area:
-        _render_revenue_area(revenue_df, filtered_months, cat_orders)
+        render_section_safe(_render_revenue_area, revenue_df, filtered_months, cat_orders,
+                            section_name="Revenue Composition")
     with col_bar:
-        _render_revenue_bar(revenue_df, filtered_months, cat_orders)
+        render_section_safe(_render_revenue_bar, revenue_df, filtered_months, cat_orders,
+                            section_name="Revenue Comparison")
 
-    # ---- COGS & Margin (if available) --------------------------------
+    # ──── COGS & Margin (if available) ───────────────────────────────────
     if not cogs_df.empty or not margin_df.empty:
         col_cogs, col_margin = st.columns(2, gap="medium")
         with col_cogs:
             if not cogs_df.empty:
-                _render_cogs_charts(cogs_df, filtered_months, cat_orders)
+                render_section_safe(_render_cogs_charts, cogs_df, filtered_months, cat_orders,
+                                    section_name="COGS by Stream")
             else:
                 st.caption("No COGS data found in sheet.")
         with col_margin:
             if not margin_df.empty:
-                _render_margin_charts(margin_df, filtered_months, cat_orders)
+                render_section_safe(_render_margin_charts, margin_df, filtered_months, cat_orders,
+                                    section_name="Margin Trend")
             else:
                 st.info(
                     "No margin % rows found below the revenue section of this sheet. "
@@ -102,34 +131,31 @@ def _render_stream_kpis(revenue_df: pd.DataFrame, filtered_months: list[str]) ->
                 revenue_df[revenue_df["Stream"] == stream]["Value"].tail(12).tolist()
             )
             render_single_kpi(stream, val, delta_str=delta_str, sparkline=sparkline)
-    st.write("")
 
 
 def _render_revenue_area(
     revenue_df: pd.DataFrame, filtered_months: list[str], cat_orders: dict
 ) -> None:
     """Render stacked area for revenue by stream."""
-    st.markdown("##### :material/stacked_area_chart: Revenue composition")
+    render_section_header("Revenue composition", "stacked_area_chart")
     vis = pd.DataFrame(revenue_df[revenue_df["Month"].isin(filtered_months)])
-    if vis.empty:
-        st.caption("No revenue data in the selected month range.")
+    if not validate_data_not_empty(vis, context="revenue composition", key_suffix="rev_area"):
         return
 
     fig_area = stacked_area_chart(
         vis, "Month", "Value", "Stream",
         category_orders=cat_orders,
     )
-    st.plotly_chart(fig_area, use_container_width=True)
+    render_plotly_chart(fig_area)
 
 
 def _render_revenue_bar(
     revenue_df: pd.DataFrame, filtered_months: list[str], cat_orders: dict
 ) -> None:
     """Render grouped bar for revenue by stream."""
-    st.markdown("##### :material/bar_chart: Revenue comparison")
+    render_section_header("Revenue comparison", "bar_chart")
     vis = pd.DataFrame(revenue_df[revenue_df["Month"].isin(filtered_months)])
-    if vis.empty:
-        st.caption("No revenue data in the selected month range.")
+    if not validate_data_not_empty(vis, context="revenue comparison", key_suffix="rev_bar"):
         return
 
     fig_bar = comparison_bar_chart(
@@ -137,37 +163,35 @@ def _render_revenue_bar(
         barmode="group",
         color_map={},
     )
-    st.plotly_chart(fig_bar, use_container_width=True)
+    render_plotly_chart(fig_bar)
 
 
 def _render_cogs_charts(
     cogs_df: pd.DataFrame, filtered_months: list[str], cat_orders: dict
 ) -> None:
     """Render COGS by stream chart."""
-    st.markdown("##### :material/money_off: COGS by stream")
+    render_section_header("COGS by stream", "money_off")
     vis = pd.DataFrame(cogs_df[cogs_df["Month"].isin(filtered_months)])
-    if vis.empty:
-        st.caption("No COGS data in selected range.")
+    if not validate_data_not_empty(vis, context="COGS", key_suffix="cogs_bar"):
         return
     fig = comparison_bar_chart(
         vis, "Month", "Value", color="Stream",
         barmode="group",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    render_plotly_chart(fig)
 
 
 def _render_margin_charts(
     margin_df: pd.DataFrame, filtered_months: list[str], cat_orders: dict
 ) -> None:
     """Render margin % trend per stream."""
-    st.markdown("##### :material/show_chart: Margin % trend")
+    render_section_header("Margin trend", "show_chart")
     vis = pd.DataFrame(margin_df[margin_df["Month"].isin(filtered_months)])
-    if vis.empty:
-        st.caption("No margin data in selected range.")
+    if not validate_data_not_empty(vis, context="margin %", key_suffix="margin_trend"):
         return
     fig = trend_line_chart(
         vis, "Month", "Value", "Stream",
         category_orders=cat_orders,
         y_format="pct",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    render_plotly_chart(fig)
