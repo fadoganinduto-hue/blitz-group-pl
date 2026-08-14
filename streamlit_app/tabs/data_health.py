@@ -22,7 +22,20 @@ from streamlit_app.components.filters import (
     render_active_filter_bar,
     render_empty_state,
 )
-from streamlit_app.data.parsers import parse_master, parse_tie_out
+from streamlit_app.data.parsers import (
+    KIND_DELTA,
+    parse_master,
+    parse_pl_sheet,
+    parse_tie_out,
+    tie_out_deltas,
+)
+from streamlit_app.data.periods import actual_months
+from streamlit_app.data.reconciliation import (
+    BRIDGE_MATERIALITY_IDR,
+    coverage_gaps,
+    master_vs_pl_bridge,
+    unreconciled_summary,
+)
 from streamlit_app.components.ui import render_page_header
 
 # ---------------------------------------------------------------------------
@@ -120,15 +133,17 @@ def get_overall_health_status(sheets: dict[str, pd.DataFrame]) -> str | None:
     if raw is None:
         return None
 
-    df = parse_tie_out(raw)
+    df = tie_out_deltas(raw)
     if df.empty:
         return None
 
-    threshold = float(st.session_state.get("health_threshold_slider", TIE_OUT_FLAG_THRESHOLD))
+    # The header badge is deliberately NOT driven by the user's threshold
+    # slider. Previously it read `health_threshold_slider`, so sliding the
+    # Data Health control to Rp10M turned the global badge green on every tab.
     abs_deltas = df["Delta"].abs()
-    if (abs_deltas > threshold * _CRITICAL_MULT).any():
+    if (abs_deltas > TIE_OUT_FLAG_THRESHOLD * _CRITICAL_MULT).any():
         return "Critical"
-    if (abs_deltas > threshold).any():
+    if (abs_deltas > TIE_OUT_FLAG_THRESHOLD).any():
         return "Attention"
     return "Healthy"
 
@@ -149,11 +164,22 @@ def render(sheets: dict[str, pd.DataFrame]) -> None:
         st.warning(":material/warning: 'TIE-OUT CHECK' sheet not found in this workbook.")
         return
 
-    df = parse_tie_out(raw)
-    if df.empty:
+    tie_out_all = parse_tie_out(raw)
+    if tie_out_all.empty:
         st.warning(
             "Could not parse reconciliation data from 'TIE-OUT CHECK'. "
             "Check that month headers appear in the first 10 rows."
+        )
+        return
+
+    # Only Δ-marked rows are variances. Component rows (MASTER total, Tracker
+    # total, Direct P&L total) and adjustment memos are context — reporting them
+    # as exceptions made a Rp2.98B revenue TOTAL the month's largest "variance".
+    df = tie_out_all[tie_out_all["Kind"] == KIND_DELTA].copy()
+    if df.empty:
+        st.warning(
+            "No Δ reconciliation rows found on 'TIE-OUT CHECK'. "
+            "Variances are identified by a leading Δ in the row label."
         )
         return
 
@@ -180,6 +206,9 @@ def render(sheets: dict[str, pd.DataFrame]) -> None:
     # Threshold control (sidebar-style inline control)
     threshold = _render_threshold_control()
 
+    # ── Section 0: Derived checks that cannot go stale ───────────────────
+    _render_derived_checks(sheets, filtered_months)
+
     # ── Section 1: Data Trust Header ─────────────────────────────────────
     _render_trust_header(df, threshold)
 
@@ -200,6 +229,98 @@ def render(sheets: dict[str, pd.DataFrame]) -> None:
 
     # ── Section 7: Drill-Down ─────────────────────────────────────────────
     _render_drilldown(df, threshold)
+
+
+# ---------------------------------------------------------------------------
+# Section 0 — Derived checks (computed from the workbook, cannot go stale)
+# ---------------------------------------------------------------------------
+
+def _render_derived_checks(
+    sheets: dict[str, pd.DataFrame],
+    filtered_months: list[str],
+) -> None:
+    """MASTER-vs-P&L revenue bridge and source coverage gaps.
+
+    The TIE-OUT CHECK sheet is maintained by hand and lags the P&L. These two
+    checks are derived from the parsed workbook, so they always reflect the file
+    that is actually loaded.
+    """
+    cons_raw = sheets.get("Consolidated Summary")
+    master_raw = sheets.get("MASTER")
+    if cons_raw is None or master_raw is None:
+        return
+
+    cons_long = parse_pl_sheet(cons_raw, "Consolidated")
+    master_df, missing = parse_master(master_raw)
+    if cons_long.empty or missing or master_df.empty:
+        return
+
+    st.markdown(
+        f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
+        f"letter-spacing:0.07em;text-transform:uppercase;margin:6px 0 10px;'>"
+        f":material/rule: Client detail vs Group P&amp;L</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Coverage: months the P&L has closed that a source has not ────────
+    closed = actual_months(cons_long)
+    tie_out_df = parse_tie_out(sheets.get("TIE-OUT CHECK", pd.DataFrame()))
+    for gap in coverage_gaps(closed, master_df, tie_out_df):
+        st.markdown(
+            f"<div style='background:{_C_ATTENTION_BG};border:1.5px solid {_C_ATTENTION};"
+            f"border-radius:8px;padding:12px 18px;margin-bottom:8px;font-size:12px;"
+            f"color:#735C00;'><strong>⚠️ Coverage gap — {gap.source}</strong><br>{gap.detail}</div>",
+            unsafe_allow_html=True,
+        )
+
+    # ── Bridge: MASTER client revenue vs Consolidated Total Gross Revenue ─
+    months = [m for m in filtered_months if m in closed] or closed
+    bridge = master_vs_pl_bridge(master_df, cons_long, months=months)
+    if bridge.empty:
+        return
+
+    border = BLITZ_COLORS["border"]
+    head = (
+        "<tr>"
+        + "".join(
+            f"<th style='padding:6px 12px;text-align:{a};font-size:11px;font-weight:700;"
+            f"color:{BLITZ_COLORS['text_secondary']};white-space:nowrap;'>{h}</th>"
+            for h, a in [
+                ("Month", "left"), ("Client breakdown (MASTER)", "right"),
+                ("Group P&L revenue", "right"), ("Variance", "right"), ("% of P&L", "right"),
+            ]
+        )
+        + "</tr>"
+    )
+    body = ""
+    for i, (_, row) in enumerate(bridge.iterrows()):
+        material = bool(row["AbsDelta"] >= BRIDGE_MATERIALITY_IDR)
+        colour = _C_CRITICAL if material else _C_HEALTHY
+        stripe = "#FFFFFF" if i % 2 == 0 else BLITZ_COLORS["off_white"]
+        pct = row["PctOfPL"]
+        pct_txt = "—" if pd.isna(pct) else f"{pct * 100:+.2f}%"
+        body += (
+            f"<tr style='background:{stripe};'>"
+            f"<td style='padding:6px 12px;font-size:12px;font-weight:600;border-bottom:1px solid {border};'>{row['Month']}</td>"
+            f"<td style='padding:6px 12px;text-align:right;font-size:12px;border-bottom:1px solid {border};'>{fmt_idr_full(row['MasterRevenue'] or 0)}</td>"
+            f"<td style='padding:6px 12px;text-align:right;font-size:12px;border-bottom:1px solid {border};'>{fmt_idr_full(row['PLRevenue'] or 0)}</td>"
+            f"<td style='padding:6px 12px;text-align:right;font-size:12px;font-weight:700;color:{colour};border-bottom:1px solid {border};'>{fmt_idr_full(row['Delta'])}</td>"
+            f"<td style='padding:6px 12px;text-align:right;font-size:12px;color:{colour};border-bottom:1px solid {border};'>{pct_txt}</td>"
+            f"</tr>"
+        )
+
+    st.markdown(
+        f"<table style='width:100%;border-collapse:collapse;margin-bottom:6px;'>"
+        f"<thead>{head}</thead><tbody>{body}</tbody></table>",
+        unsafe_allow_html=True,
+    )
+    gross = float(bridge["AbsDelta"].sum())
+    net = float(bridge["Delta"].sum())
+    st.caption(
+        f"Gross unreconciled {fmt_idr(gross)} across {len(bridge)} month(s); "
+        f"net {fmt_idr(net)}. Computed from the loaded workbook — independent of "
+        f"the TIE-OUT CHECK sheet."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -246,13 +367,17 @@ def _render_threshold_control() -> float:
 
 def _render_trust_header(df: pd.DataFrame, threshold: float) -> None:
     """Prominent health summary — CFO's first read."""
-    total = len(df)
-    flagged = int((df["AbsDelta"] > threshold).sum())
+    summary = unreconciled_summary(df, threshold)
+    total = int(summary["total_rows"])
+    flagged = int(summary["flagged"])
+    below = int(summary["below_threshold"])
     critical = int((df["AbsDelta"] > threshold * _CRITICAL_MULT).sum())
-    passing = total - flagged
-    largest = float(df["AbsDelta"].max()) if not df.empty else 0.0
+    passing = int(summary["zero"])
+    largest = float(summary["largest"])
 
-    # Overall status
+    # Overall status. "All Checks Passing" is only claimed when every variance
+    # is genuinely zero — not merely below the user's threshold. The previous
+    # wording let a raised slider report unreconciled books as clean.
     if critical > 0:
         status_label = "Critical — Immediate Attention Required"
         status_color = _C_CRITICAL
@@ -260,6 +385,11 @@ def _render_trust_header(df: pd.DataFrame, threshold: float) -> None:
         status_icon = "⛔"
     elif flagged > 0:
         status_label = "Attention Required"
+        status_color = _C_ATTENTION
+        status_bg = _C_ATTENTION_BG
+        status_icon = "⚠️"
+    elif below > 0:
+        status_label = f"Ties out within tolerance — {below} variance(s) below threshold"
         status_color = _C_ATTENTION
         status_bg = _C_ATTENTION_BG
         status_icon = "⚠️"
@@ -271,7 +401,7 @@ def _render_trust_header(df: pd.DataFrame, threshold: float) -> None:
 
     pct_pass = (passing / total * 100) if total > 0 else 100.0
     bar_w = int(min(100, pct_pass))
-    bar_color = _C_HEALTHY if critical == 0 and flagged == 0 else (
+    bar_color = _C_HEALTHY if critical == 0 and flagged == 0 and below == 0 else (
         _C_CRITICAL if critical > 0 else _C_ATTENTION
     )
 
@@ -431,12 +561,33 @@ def _render_exceptions(df: pd.DataFrame, threshold: float) -> None:
         unsafe_allow_html=True,
     )
 
+    summary = unreconciled_summary(df, threshold)
+    below = int(summary["below_threshold"])
     exceptions = df[df["AbsDelta"] > threshold].sort_values("AbsDelta", ascending=False).head(10)
+
+    # Always state what the threshold is hiding. "No variances above threshold"
+    # is not the same claim as "everything ties out", and conflating the two is
+    # how an unreconciled month gets signed off.
+    if below > 0:
+        st.caption(
+            f":material/filter_alt: {below} further non-zero variance(s) totalling "
+            f"{fmt_idr(float(summary['gross_variance']) - float(df.loc[df['AbsDelta'] > threshold, 'AbsDelta'].sum()))} "
+            f"fall below the Rp{threshold:,.0f} threshold and are not listed below."
+        )
+
     if exceptions.empty:
+        banner_bg = _C_HEALTHY_BG if below == 0 else _C_ATTENTION_BG
+        banner_fg = _C_HEALTHY if below == 0 else _C_ATTENTION
+        message = (
+            "✅ Every reconciliation check is exactly zero for the selected months."
+            if below == 0
+            else f"⚠️ No variance exceeds Rp{threshold:,.0f}, but {below} non-zero "
+                 f"variance(s) remain. This is within tolerance, not reconciled."
+        )
         st.markdown(
-            f"<div style='background:{_C_HEALTHY_BG};border:1.5px solid {_C_HEALTHY};"
-            f"border-radius:8px;padding:14px 20px;font-weight:600;color:{_C_HEALTHY};'>"
-            f"✅ No reconciliation variances above threshold — all periods tie out cleanly.</div>",
+            f"<div style='background:{banner_bg};border:1.5px solid {banner_fg};"
+            f"border-radius:8px;padding:14px 20px;font-weight:600;color:{banner_fg};'>"
+            f"{message}</div>",
             unsafe_allow_html=True,
         )
         return
@@ -867,9 +1018,12 @@ def _render_drilldown(df: pd.DataFrame, threshold: float) -> None:
                 "AbsDelta": "Absolute Variance",
                 "RootCause": "Likely Cause",
             })
+            # Sort on the NUMERIC value before formatting. Sorting the
+            # formatted strings ranked "Rp999K" above "Rp1.2B" lexicographically
+            # and buried the largest exception mid-table.
+            display_df = display_df.sort_values("Absolute Variance", ascending=False)
             display_df["Variance (IDR)"] = display_df["Variance (IDR)"].apply(fmt_idr_full)
             display_df["Absolute Variance"] = display_df["Absolute Variance"].apply(fmt_idr)
-            display_df = display_df.sort_values("Absolute Variance", ascending=False)
 
             def _style_dd(row: pd.Series) -> list[str]:
                 raw_abs = filtered.loc[row.name, "AbsDelta"] if row.name in filtered.index else 0
@@ -892,11 +1046,14 @@ def _render_drilldown(df: pd.DataFrame, threshold: float) -> None:
     )
     if full_pivot.open:
         with full_pivot:
-            _render_full_pivot(df)
+            _render_full_pivot(df, threshold)
 
 
-def _render_full_pivot(df: pd.DataFrame) -> None:
+def _render_full_pivot(df: pd.DataFrame, threshold: float | None = None) -> None:
     """Full reconciliation pivot with conditional formatting."""
+    # Honour the user's threshold. Previously this used the module constant, so
+    # dropping the slider to Rp0 to surface everything still hid sub-Rp1M cells.
+    limit = float(threshold) if threshold is not None else float(TIE_OUT_FLAG_THRESHOLD)
     if df.empty:
         return
     try:
@@ -908,9 +1065,9 @@ def _render_full_pivot(df: pd.DataFrame) -> None:
             try:
                 fv = float(v)  # type: ignore[arg-type]
                 abs_fv = abs(fv)
-                if abs_fv > TIE_OUT_FLAG_THRESHOLD * _CRITICAL_MULT:
+                if abs_fv > limit * _CRITICAL_MULT:
                     return f"background-color:{_C_CRITICAL_BG};color:{_C_CRITICAL};font-weight:600;"
-                if abs_fv > TIE_OUT_FLAG_THRESHOLD:
+                if abs_fv > limit:
                     return f"background-color:{_C_ATTENTION_BG};color:{_C_ATTENTION};"
             except (TypeError, ValueError):
                 pass
