@@ -27,7 +27,11 @@ from streamlit_app.components.ui import render_page_header, render_section_safe
 from streamlit_app.constants import (
     BLITZ_COLORS,
     CONSOLIDATED_KPI_METRICS,
+    GROSS_PROFIT_METRIC,
     OPEX_LINE_ITEMS,
+    OPEX_RECONCILIATION_FLOOR,
+    OPEX_TOTAL_METRIC,
+    WATERFALL_RESIDUAL_FLOOR,
     WATERFALL_STEPS,
     fmt_idr,
     fmt_idr_full,
@@ -41,6 +45,10 @@ from streamlit_app.data.analytics import (
     find_chart_annotations,
 )
 from streamlit_app.data.parsers import parse_master, parse_pl_sheet, parse_ratios
+from streamlit_app.data.periods import (
+    latest_actual_month as latest_actual_month_of,
+    restrict_to_actuals,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -54,30 +62,13 @@ def _get_val(cons_long: pd.DataFrame, metric: str, month: str) -> float | None:
 
 
 def _find_latest_actual_month(cons_long: pd.DataFrame, all_months: list[str]) -> str | None:
-    """Return the last month in all_months that has a non-zero Total Gross Revenue.
-
-    This prevents the dashboard from defaulting to a future/unpopulated month
-    that has zero revenue, which would produce misleading KPI cards and alerts.
-    """
-    rev_metric = "Total Gross Revenue"
-    for month in reversed(all_months):
-        val = _get_val(cons_long, rev_metric, month)
-        if val is not None and val != 0:
-            return month
-    return None
+    """Return the last closed month. Delegates to the shared periods module."""
+    return latest_actual_month_of(cons_long)
 
 
 def _build_actual_months(cons_long: pd.DataFrame, months: list[str]) -> list[str]:
-    """Return only those months from `months` where Total Gross Revenue is non-zero.
-
-    Used to guard anomaly detection and comparisons against unpopulated
-    future periods that would produce false 100% decline alerts.
-    """
-    rev_metric = "Total Gross Revenue"
-    return [
-        m for m in months
-        if _get_val(cons_long, rev_metric, m) not in (None, 0)
-    ]
+    """Return only the closed months from `months`."""
+    return restrict_to_actuals(months, cons_long)
 
 
 # ---------------------------------------------------------------------------
@@ -641,38 +632,52 @@ def _render_waterfall(cons_long: pd.DataFrame, latest_month: str) -> None:
     )
     latest_data = pd.DataFrame(cons_long[cons_long["Month"] == latest_month])
 
-    labels: list[str] = []
-    raw_values: list[float] = []
-    for metric_key, display_name in WATERFALL_STEPS:
+    steps: list[tuple[str, float, str]] = []
+    for metric_key, display_name, role in WATERFALL_STEPS:
         rows = pd.DataFrame(latest_data[latest_data["Metric"] == metric_key])
         if not rows.empty:
-            labels.append(display_name)
-            raw_values.append(float(rows["Value"].sum(skipna=True)))
+            steps.append(
+                (display_name, convert_value(float(rows["Value"].sum(skipna=True))), role)
+            )
 
-    if len(labels) < 2:
+    if len(steps) < 2:
         st.caption("Insufficient waterfall metrics for this month.")
         return
 
-    # Apply currency conversion to all values before computing steps
-    converted_values = [convert_value(v) for v in raw_values]
-
-    subtotal_names = {"Gross Profit", "EBITDA", "Net Profit"}
-    measures: list[str] = []
+    # Build the bridge so the running total always lands exactly on each subtotal
+    # the workbook reports. Costs are stored positive, so a cost step is -value.
+    # Where the running total does not reach the next subtotal (for example the
+    # depreciation add-back between Operating Revenue and EBITDA), the gap is
+    # drawn as an explicit residual bar. The chart can therefore never disagree
+    # with the KPI cards above it.
+    residual_floor = convert_value(WATERFALL_RESIDUAL_FLOOR)
+    labels: list[str] = []
     waterfall_values: list[float] = []
-    cumulative = 0.0
-    for i, (lbl, val) in enumerate(zip(labels, converted_values)):
-        if i == 0:
-            waterfall_values.append(val)
+    measures: list[str] = []
+    running = 0.0
+
+    for index, (label, value, role) in enumerate(steps):
+        if role == "start" or index == 0:
+            labels.append(label)
+            waterfall_values.append(value)
             measures.append("absolute")
-            cumulative = val
-        elif lbl in subtotal_names:
-            waterfall_values.append(val)
-            measures.append("total")
-            cumulative = val
-        else:
-            waterfall_values.append(val - cumulative)
+            running = value
+        elif role == "cost":
+            labels.append(label)
+            waterfall_values.append(-value)
             measures.append("relative")
-            cumulative = val
+            running -= value
+        else:  # subtotal
+            residual = value - running
+            if abs(residual) >= abs(residual_floor):
+                labels.append("Other")
+                waterfall_values.append(residual)
+                measures.append("relative")
+                running += residual
+            labels.append(label)
+            waterfall_values.append(value)
+            measures.append("total")
+            running = value
 
     # Build the waterfall with currency-aware bar labels
     fig = waterfall_chart(labels, waterfall_values, measures=measures)
@@ -803,20 +808,24 @@ def _render_opex_breakdown(
         .sort_values("Value", ascending=False)
     )
     if opex_data.empty:
-        # ── TEMPORARY DIAGNOSTIC (remove after investigation) ──────────────────
-        with st.expander("🔍 DIAGNOSTIC: All metrics in parsed data for this month", expanded=True):
-            all_metrics = sorted(month_data["Metric"].unique().tolist())
-            st.caption(f"Total metrics found in cons_long for **{latest_month}**: {len(all_metrics)}")
-            st.write("**All metric names (exact strings from workbook):**")
-            for m in all_metrics:
-                match = "✅ IN OPEX_LINE_ITEMS" if m in OPEX_LINE_ITEMS else ""
-                st.text(f"  • {m!r}  {match}")
-            st.write("**OPEX_LINE_ITEMS we are looking for:**")
-            for m in OPEX_LINE_ITEMS:
-                st.text(f"  • {m!r}")
-        # ── END DIAGNOSTIC ─────────────────────────────────────────────────────
-        st.caption("No OpEx line items found.")
+        st.caption(
+            "No OpEx line items found for this month — the workbook's operating "
+            "expense labels may have changed."
+        )
         return
+
+    # The breakdown must reconcile to the workbook's own OpEx subtotal. If it
+    # does not, say so rather than presenting a partial list as complete.
+    _opex_total = _get_val(cons_long, OPEX_TOTAL_METRIC, latest_month)
+    if _opex_total:
+        _residual = _opex_total - float(opex_data["Value"].sum())
+        if abs(_residual) >= OPEX_RECONCILIATION_FLOOR:
+            st.caption(
+                f":material/info: Line items shown cover "
+                f"{fmt_idr(float(opex_data['Value'].sum()))} of "
+                f"{fmt_idr(_opex_total)} total OpEx — "
+                f"{fmt_idr(abs(_residual))} is unallocated."
+            )
 
     if prior_month:
         prior_data = pd.DataFrame(cons_long[cons_long["Month"] == prior_month])
@@ -903,7 +912,7 @@ def _build_combo_data(
         .rename(columns={"Value": "Revenue"})
     )
     gp = (
-        cons_long[cons_long["Metric"].isin(["Gross Profit 2", "Gross Profit 1"])]
+        cons_long[cons_long["Metric"] == GROSS_PROFIT_METRIC]
         .groupby(["Month", "MonthDate"], as_index=False)["Value"]
         .sum()
         .rename(columns={"Value": "GrossProfit"})

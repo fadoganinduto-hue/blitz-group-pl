@@ -118,30 +118,64 @@ METRIC_SECTIONS: dict[str, list[str]] = {
     ],
 }
 
-# Metrics used for the waterfall chart (in order, sign convention: positive = value as-is)
-WATERFALL_STEPS: list[tuple[str, str]] = [
-    # (metric_label_in_data, display_name)
-    ("Total Gross Revenue", "Gross Revenue"),
-    ("Total COGS", "COGS"),
-    ("Gross Profit 2", "Gross Profit"),
-    ("Total Operating Expenses", "OpEx"),
-    ("EBITDA", "EBITDA"),
-    ("NET PROFIT/LOSS (Before Tax)", "Net Profit"),
+# ---------------------------------------------------------------------------
+# P&L bridge (waterfall)
+# ---------------------------------------------------------------------------
+# Each step declares its ROLE so the bridge arithmetic is explicit:
+#   "start"    — opening bar, taken at face value
+#   "cost"     — subtracted from the running total (costs are stored POSITIVE
+#                in this workbook, so the step is -value)
+#   "subtotal" — a figure the workbook already computed. The running total must
+#                land exactly on it; any gap is emitted as a visible residual
+#                bar rather than silently absorbed.
+#
+# The previous list had no roles, and the renderer computed every step as
+# `current_line - previous_line`. On Jun 2026 that drew the COGS bar as
+# +Rp489M (actual -Rp4.73B) and EBITDA as -Rp5.21B (actual -Rp2.85B), while the
+# bar labels still printed the correct figures.
+WATERFALL_STEPS: list[tuple[str, str, str]] = [
+    # (metric_label_in_data, display_name, role)
+    ("Total Gross Revenue", "Gross Revenue", "start"),
+    ("Total COGS", "COGS", "cost"),
+    ("Gross Profit 1", "Gross Profit 1", "subtotal"),
+    ("Depreciation (COGS)", "D&A (COGS)", "cost"),
+    ("Gross Profit 2", "Gross Profit", "subtotal"),
+    ("Total Operating Expenses", "OpEx", "cost"),
+    ("EBITDA", "EBITDA", "subtotal"),
+    ("NET PROFIT/LOSS (Before Tax)", "Net Profit", "subtotal"),
 ]
 
-# Individual OpEx line items for the breakdown bar chart
+# Bridge residuals below this are rounding; above it they get their own bar.
+WATERFALL_RESIDUAL_FLOOR: float = 500_000.0  # IDR
+
+# The single subtotal used for gross margin. Never sum or average margin rows,
+# and never combine Gross Profit 1 and Gross Profit 2 — the sheet reports both,
+# and adding them reported Jun 2026 gross margin as -24.2% against a true -12.7%.
+GROSS_PROFIT_METRIC: str = "Gross Profit 2"
+
+# Individual OpEx line items for the breakdown bar chart.
+#
+# Must contain ONLY rows that roll up into "Total Operating Expenses". The
+# original list also carried "Courier Fees" (a COGS line, Rp3.70B), "Others"
+# (a REVENUE line) and a bare "Depreciation" that double-counted the COGS
+# depreciation — so the breakdown summed to Rp6.03B against a true OpEx of
+# Rp2.36B and ranked Courier Fees as the largest operating expense.
 OPEX_LINE_ITEMS: list[str] = [
     "Salaries",
     "Office and Hub Rentals",
     "Overheads",
+    "Outsourced Services",
     "IT Software and Services",
     "Marketing",
     "Travel",
     "Depreciation (OpEx)",
-    "Depreciation",         # fallback if not disambiguated
-    "Courier Fees",
-    "Others",
 ]
+
+# Roll-up subtotal the OpEx line items must reconcile to.
+OPEX_TOTAL_METRIC: str = "Total Operating Expenses"
+
+# Unallocated OpEx above this is surfaced to the user rather than ignored.
+OPEX_RECONCILIATION_FLOOR: float = 1_000_000.0  # IDR
 
 # ---------------------------------------------------------------------------
 # Blitz brand colour palette (centralized)
