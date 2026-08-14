@@ -14,6 +14,8 @@ import streamlit as st
 from streamlit_app.components.filters import (
     render_sidebar_filters,
     render_sidebar_global_filters,
+    sync_state_from_url,
+    sync_url_from_state,
 )
 from streamlit_app.components.ui import (
     apply_global_visual_system,
@@ -220,6 +222,9 @@ if _master_raw is not None:
         _entity_options = sorted(_master_df["Entity"].dropna().unique().tolist())
         _stream_options = sorted(_master_df["Rev Stream"].dropna().unique().tolist())
         _industry_options = sorted(_master_df["Industry"].dropna().unique().tolist())
+        
+        st.session_state["_entity_stream_map"] = _master_df.groupby("Entity")["Rev Stream"].apply(lambda x: sorted(x.dropna().unique())).to_dict()
+        st.session_state["_entity_industry_map"] = _master_df.groupby("Entity")["Industry"].apply(lambda x: sorted(x.dropna().unique())).to_dict()
 
 # Store option lists in session state so filter bar can compare against "all"
 st.session_state["_all_entity_options"] = _entity_options
@@ -246,30 +251,24 @@ else:
 # Sidebar — filters
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    render_sidebar_filters(_global_months)
-    render_sidebar_global_filters(
-        entity_options=_entity_options,
-        stream_options=_stream_options,
-        industry_options=_industry_options,
-        month_options=_global_months,
-    )
+    sync_state_from_url(_global_months)
+    # Removing duplicate date filters here to avoid duplicate filter controls on Overview.
+    # The Overview uses the Main Filter Bar. 
+    # (If needed in other tabs, they should implement their own or use the global ones).
+    # render_sidebar_global_filters(
+    #     entity_options=_entity_options,
+    #     stream_options=_stream_options,
+    #     industry_options=_industry_options,
+    #     month_options=_global_months,
+    # )
 
     st.sidebar.divider()
-    st.sidebar.markdown(
-        f"<p style='font-size:10px;font-weight:700;letter-spacing:0.08em;"
-        f"text-transform:uppercase;color:{BLITZ_COLORS['primary_hover']};"
-        f"margin:0 0 4px 0;padding:10px 0 0 0;'>Display</p>",
-        unsafe_allow_html=True,
-    )
-    fx_display = f"USD (1 USD = Rp{int(st.session_state.get('fx_rate', 15_000)):,})"
-    currency = st.sidebar.segmented_control(
-        "Display currency",
-        options=["IDR", "USD"],
-        default=st.session_state.get("currency", "IDR"),
-        key="currency_ctrl",
-        help=f"IDR values are converted at the FX rate from the Settings sheet: {fx_display}",
-    )
-    st.session_state["currency"] = currency or "IDR"
+    # Currency control has been removed from the sidebar to prevent duplication
+    # with the Overview tab's main filter bar.
+    if "currency" not in st.session_state:
+        st.session_state["currency"] = "IDR"
+    
+    sync_url_from_state(_global_months)
 
     # AI status indicator
     st.sidebar.divider()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import pandas as pd
 import streamlit as st
 from google import genai
@@ -20,6 +21,7 @@ from streamlit_app.data.parsers import (
 # ---------------------------------------------------------------------------
 
 _MODEL = "gemini-2.5-flash"
+ANOMALY_THRESHOLD_PCT = 15.0
 
 
 def _get_api_key() -> str | None:
@@ -65,13 +67,23 @@ def _safe_metric_val(df: pd.DataFrame, metric: str, month: str) -> float | None:
 def prepare_data_context(
     sheets: dict[str, pd.DataFrame],
     filtered_months: list[str] | None = None,
+    comparison_period: str | None = None,
+    wb_hash: str | None = None,
 ) -> str:
-    """Convert parsed P&L DataFrames into a concise text summary for the LLM.
+    """Convert parsed P&L DataFrames into a structured JSON payload for the LLM.
 
-    The output is a structured, token-efficient summary of the financial data
+    The output is a strict JSON summary of the financial data
     that fits comfortably within the model's context window.
     """
-    sections: list[str] = []
+    context_data = {
+        "period": filtered_months,
+        "comparison_period": comparison_period,
+        "workbook_hash": wb_hash,
+        "group_kpis": {},
+        "entities": {},
+        "client_concentration": {},
+        "data_health": {}
+    }
 
     # ── 1. Consolidated P&L ──────────────────────────────────────────────
     raw_cons = sheets.get("Consolidated Summary")
@@ -86,48 +98,27 @@ def prepare_data_context(
                 "Total Gross Revenue", "Total COGS", "Gross Profit 2",
                 "Total Operating Expenses", "EBITDA", "NET PROFIT/LOSS (Before Tax)",
             ]
-            lines = ["## Consolidated P&L (IDR)"]
-            lines.append(f"Months in dataset: {', '.join(all_months)}")
-            lines.append(f"Filtered months: {', '.join(months)}")
-            lines.append("")
-
+            
             for metric in key_metrics:
-                vals = []
+                context_data["group_kpis"][metric] = {}
                 for m in months:
                     v = _safe_metric_val(cons, metric, m)
-                    vals.append(f"{m}: {fmt_idr(v)}" if v is not None else f"{m}: N/A")
-                lines.append(f"**{metric}**: {' | '.join(vals)}")
-
-            # MoM changes for the latest two months
-            if len(months) >= 2:
-                latest, prior = months[-1], months[-2]
-                lines.append(f"\n### MoM changes ({prior} → {latest}):")
-                for metric in key_metrics:
-                    cur = _safe_metric_val(cons, metric, latest)
-                    prev = _safe_metric_val(cons, metric, prior)
-                    if cur is not None and prev is not None and prev != 0:
-                        pct = (cur - prev) / abs(prev) * 100
-                        lines.append(f"- {metric}: {pct:+.1f}% ({fmt_idr(prev)} → {fmt_idr(cur)})")
-
-            sections.append("\n".join(lines))
-
+                    if v is not None:
+                        context_data["group_kpis"][metric][m] = v
+            
             # Ratios
             ratios = parse_ratios(raw_cons, "Consolidated")
             if not ratios.empty:
-                ratio_lines = ["\n## Margin Ratios"]
+                context_data["group_kpis"]["Ratios"] = {}
                 for ratio_name in ratios["Metric"].unique():
-                    r_vals = []
+                    context_data["group_kpis"]["Ratios"][ratio_name] = {}
                     for m in months:
                         r = ratios[(ratios["Metric"] == ratio_name) & (ratios["Month"] == m)]
                         if not r.empty:
-                            r_vals.append(f"{m}: {float(r['Value'].iloc[0]) * 100:.1f}%")
-                    if r_vals:
-                        ratio_lines.append(f"**{ratio_name}**: {' | '.join(r_vals)}")
-                sections.append("\n".join(ratio_lines))
+                            context_data["group_kpis"]["Ratios"][ratio_name][m] = float(r['Value'].iloc[0])
 
     # ── 2. Per-entity summaries ──────────────────────────────────────────
     from streamlit_app.constants import ENTITY_SUMMARY_SHEETS
-    entity_lines = ["\n## Per-Entity Revenue & EBITDA"]
     for entity, sheet_name in ENTITY_SUMMARY_SHEETS.items():
         raw = sheets.get(sheet_name)
         if raw is None:
@@ -141,51 +132,33 @@ def prepare_data_context(
         if not months:
             continue
 
-        rev_vals = []
-        ebitda_vals = []
-        for m in months[-6:]:  # Last 6 months to keep context tight
+        context_data["entities"][entity] = {"Revenue": {}, "EBITDA": {}}
+        for m in months[-6:]:  # Last 6 months
             rv = _safe_metric_val(df, "Total Gross Revenue", m)
             ev = _safe_metric_val(df, "EBITDA", m)
-            rev_vals.append(f"{m}: {fmt_idr(rv)}" if rv is not None else f"{m}: N/A")
-            ebitda_vals.append(f"{m}: {fmt_idr(ev)}" if ev is not None else f"{m}: N/A")
-
-        entity_lines.append(f"\n### {entity}")
-        entity_lines.append(f"Revenue: {' | '.join(rev_vals)}")
-        entity_lines.append(f"EBITDA: {' | '.join(ebitda_vals)}")
-
-    if len(entity_lines) > 1:
-        sections.append("\n".join(entity_lines))
+            if rv is not None:
+                context_data["entities"][entity]["Revenue"][m] = rv
+            if ev is not None:
+                context_data["entities"][entity]["EBITDA"][m] = ev
 
     # ── 3. Client concentration from MASTER ──────────────────────────────
     raw_master = sheets.get("MASTER")
     if raw_master is not None:
         master, missing = parse_master(raw_master)
         if not missing and not master.empty:
-            client_lines = ["\n## Client Concentration"]
             total = master["Amount (IDR)"].sum()
             top10 = master.groupby("Client (clean)")["Amount (IDR)"].sum().nlargest(10)
-            if total > 0:
-                client_lines.append(f"Total revenue (all-time): {fmt_idr(total)}")
-                client_lines.append(f"Top-10 clients ({top10.sum() / total * 100:.1f}% of total):")
-                for client_name, client_rev in top10.items():
-                    pct = client_rev / total * 100
-                    client_lines.append(f"  - {client_name}: {fmt_idr(client_rev)} ({pct:.1f}%)")
-
-            # Industry breakdown
+            
+            context_data["client_concentration"]["total_revenue_all_time"] = float(total)
+            context_data["client_concentration"]["top_10"] = {}
+            for client_name, client_rev in top10.items():
+                context_data["client_concentration"]["top_10"][client_name] = float(client_rev)
+                
             ind_rev = master.groupby("Industry")["Amount (IDR)"].sum().sort_values(ascending=False)
-            if not ind_rev.empty:
-                client_lines.append("\nRevenue by Industry:")
-                for ind, val in ind_rev.head(8).items():
-                    client_lines.append(f"  - {ind}: {fmt_idr(val)}")
-
-            # Revenue stream breakdown
+            context_data["client_concentration"]["by_industry"] = {ind: float(val) for ind, val in ind_rev.head(8).items()}
+            
             stream_rev = master.groupby("Rev Stream")["Amount (IDR)"].sum().sort_values(ascending=False)
-            if not stream_rev.empty:
-                client_lines.append("\nRevenue by Stream:")
-                for stream, val in stream_rev.head(8).items():
-                    client_lines.append(f"  - {stream}: {fmt_idr(val)}")
-
-            sections.append("\n".join(client_lines))
+            context_data["client_concentration"]["by_stream"] = {st: float(val) for st, val in stream_rev.head(8).items()}
 
     # ── 4. Data quality (TIE-OUT CHECK) ──────────────────────────────────
     raw_tie = sheets.get("TIE-OUT CHECK")
@@ -193,18 +166,14 @@ def prepare_data_context(
         tie = parse_tie_out(raw_tie)
         if not tie.empty:
             flagged = tie[tie["Delta"].abs() > 1_000_000]
-            quality_lines = ["\n## Data Quality (TIE-OUT CHECK)"]
-            quality_lines.append(f"Total reconciliation rows: {len(tie)}")
-            quality_lines.append(f"Flagged rows (|delta| > Rp1M): {len(flagged)}")
-            if not flagged.empty:
-                quality_lines.append("Largest discrepancies:")
-                for _, row in flagged.nlargest(5, "Delta").iterrows():
-                    quality_lines.append(
-                        f"  - {row['Label']} ({row['Month']}): {fmt_idr(row['Delta'])}"
-                    )
-            sections.append("\n".join(quality_lines))
+            context_data["data_health"]["total_rows"] = len(tie)
+            context_data["data_health"]["flagged_rows"] = len(flagged)
+            context_data["data_health"]["largest_discrepancies"] = [
+                {"Label": row['Label'], "Month": row['Month'], "Delta": float(row['Delta'])}
+                for _, row in flagged.nlargest(5, "Delta").iterrows()
+            ]
 
-    return "\n\n".join(sections)
+    return json.dumps(context_data, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -216,27 +185,36 @@ _SYSTEM_INSTRUCTION = (
     "for a holding company with three subsidiaries: Blitz, Borzo, and TheLorry. "
     "All monetary values are in Indonesian Rupiah (IDR) unless stated otherwise. "
     "Provide insightful, data-driven analysis. Be specific — reference actual numbers, "
-    "months, and entities. Use bullet points for clarity. "
+    "months, and entities. Use bullet points for clarity.\n\n"
+    "STRICT FACTUAL HIERARCHY:\n"
+    "1. OBSERVED FACT: Directly computed from data.\n"
+    "2. DERIVED FACT: Mathematically derived from available data.\n"
+    "3. INTERPRETATION: Cautious interpretation supported by evidence.\n"
+    "4. HYPOTHESIS: Clearly labeled as a possibility.\n"
+    "Never present Level 3/4 as Level 1. Do not invent budgets, forecasts, market events, "
+    "management actions, or causes if they aren't explicitly in the data. "
     "If the data is insufficient to answer a question, say so clearly."
 )
 
 
+@st.cache_data(show_spinner=False)
 def generate_executive_summary(
     data_context: str,
     latest_month: str,
 ) -> str:
     """Generate an AI executive summary for the latest month."""
-    prompt = f"""Based on the following financial data, write a concise executive summary 
+    prompt = f"""Based on the following JSON financial data, write a concise executive summary 
 for the month of **{latest_month}**. Structure it as:
 
-1. **Headline** — One sentence capturing the key takeaway
-2. **Revenue Performance** — Consolidated and per-entity revenue trends
-3. **Profitability** — EBITDA and net profit analysis, margin movements
-4. **Cost Analysis** — Key cost drivers (COGS, OpEx) and any notable changes
-5. **Risk Flags** — Client concentration, data quality issues, any concerns
-6. **Recommendation** — 2-3 actionable items for management
+1. **What changed?** — One sentence capturing the key takeaway.
+2. **How material was it?** — Quantify the main changes in revenue and profit.
+3. **What were the main drivers?** — Which entities, streams, or clients drove this?
+4. **What is the largest risk?** — Client concentration, margins, or data quality concerns.
+5. **What deserves management attention?** — 2 actionable recommendations.
 
 Keep it to ~300 words. Be direct and specific.
+At the very end, generate 2-3 specific follow-up questions based on this exact data state 
+that the user could ask to dig deeper (e.g. 'Which clients drove the decline in Blitz?').
 
 ---
 DATA:
@@ -253,9 +231,10 @@ DATA:
     return response.text or "No summary generated."
 
 
+@st.cache_data(show_spinner=False)
 def detect_anomalies(data_context: str) -> str:
     """Detect anomalies and unusual patterns in the financial data."""
-    prompt = f"""Analyze the following financial data and identify anomalies, unusual patterns, 
+    prompt = f"""Analyze the following JSON financial data and identify anomalies, unusual patterns, 
 or items that need management attention. For each finding:
 
 - **What**: Describe the anomaly clearly
@@ -265,7 +244,7 @@ or items that need management attention. For each finding:
 - **Suggested Action**: What should management do
 
 Look for:
-- Revenue spikes or drops > 15% MoM
+- Revenue spikes or drops > {ANOMALY_THRESHOLD_PCT}% MoM
 - Margin compression or expansion
 - Cost items growing faster than revenue
 - Client concentration changes

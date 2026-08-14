@@ -231,7 +231,10 @@ def fmt_idr(value: float) -> str:
     abs_val = abs(value)
     for threshold, suffix, divisor in IDR_SUFFIX_THRESHOLDS:
         if abs_val >= threshold:
-            return f"{'-' if value < 0 else ''}Rp{abs_val / divisor:,.1f}{suffix}"
+            formatted = f"{abs_val / divisor:,.1f}"
+            if formatted.endswith(".0"):
+                formatted = formatted[:-2]
+            return f"{'-' if value < 0 else ''}Rp{formatted}{suffix}"
     return f"{'-' if value < 0 else ''}Rp{abs_val:,.0f}"
 
 

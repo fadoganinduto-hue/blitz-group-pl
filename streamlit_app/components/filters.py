@@ -212,7 +212,7 @@ def _apply_preset(preset: str, month_options: list[str]) -> tuple[int, int]:
 
     # Custom → preserve current state unchanged
     cur_start = max(0, min(int(st.session_state.get("month_start_idx", 0)), n - 1))
-    cur_end = max(cur_start, min(int(st.session_state.get("month_end_idx", end_idx)), n - 1))
+    cur_end = max(cur_start, min(int(st.session_state.get("month_end_idx", n - 1)), n - 1))
     return cur_start, cur_end
 
 
@@ -229,27 +229,40 @@ def _sidebar_section_header(label: str) -> None:
 
 
 def _resolve_compare_label(
-    month_options: list[str], end_idx: int, mode: str
+    month_options: list[str], start_idx: int, end_idx: int, mode: str
 ) -> str | None:
-    """Return the human-readable name of the comparison month for a given mode."""
+    """Return the human-readable name of the comparison period for a given mode."""
     if not month_options:
         return None
 
     if mode == "Prior Month":
-        return month_options[end_idx - 1] if end_idx > 0 else None
+        duration = end_idx - start_idx + 1
+        new_start = start_idx - duration
+        new_end = end_idx - duration
+        if new_start >= 0:
+            if new_start == new_end:
+                return month_options[new_start]
+            return f"{month_options[new_start]} → {month_options[new_end]}"
+        return None
 
     if mode == "Same Month LY":
         # Prefer a direct year-offset lookup so we get the right label
         try:
+            start_dt = _parse_month(month_options[start_idx])
+            target_start = start_dt.replace(year=start_dt.year - 1).strftime("%b %Y")
             end_dt = _parse_month(month_options[end_idx])
-            target_str = end_dt.replace(year=end_dt.year - 1).strftime("%b %Y")
-            if target_str in month_options:
-                return target_str
+            target_end = end_dt.replace(year=end_dt.year - 1).strftime("%b %Y")
+            if target_start in month_options and target_end in month_options:
+                if target_start == target_end:
+                    return target_start
+                return f"{target_start} → {target_end}"
         except (ValueError, AttributeError):
             pass
         # Fallback: 12 positions back in the list
-        if end_idx >= 12:
-            return month_options[end_idx - 12]
+        if start_idx >= 12:
+            if start_idx == end_idx:
+                return month_options[start_idx - 12]
+            return f"{month_options[start_idx - 12]} → {month_options[end_idx - 12]}"
 
     return None
 
@@ -380,10 +393,15 @@ def render_sidebar_filters(month_options: list[str]) -> None:
     # Show the resolved comparison month below the control
     if compare_display != "None":
         cmp_label = _resolve_compare_label(
-            month_options, end_idx, st.session_state["compare_mode"]
+            month_options, start_idx, end_idx, st.session_state["compare_mode"]
         )
         if cmp_label:
+            st.session_state["_resolved_compare_label"] = cmp_label
             st.sidebar.caption(f"vs **{cmp_label}**")
+        else:
+            st.session_state.pop("_resolved_compare_label", None)
+    else:
+        st.session_state.pop("_resolved_compare_label", None)
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +457,15 @@ def render_sidebar_global_filters(
 
     # ── Revenue stream filter ────────────────────────────────────────────
     if stream_options:
+        active_entities = st.session_state.get("sidebar_entity_filter")
+        if active_entities and len(active_entities) != len(entity_options):
+            stream_map = st.session_state.get("_entity_stream_map", {})
+            valid_streams = set()
+            for ent in active_entities:
+                valid_streams.update(stream_map.get(ent, []))
+            if valid_streams:
+                stream_options = [s for s in stream_options if s in valid_streams]
+
         _key = "sidebar_stream_filter"
         st.session_state.setdefault(_key, list(stream_options))
         current_s = [v for v in st.session_state[_key] if v in stream_options]
@@ -459,6 +486,15 @@ def render_sidebar_global_filters(
 
     # ── Industry filter ──────────────────────────────────────────────────
     if industry_options:
+        active_entities = st.session_state.get("sidebar_entity_filter")
+        if active_entities and len(active_entities) != len(entity_options):
+            ind_map = st.session_state.get("_entity_industry_map", {})
+            valid_inds = set()
+            for ent in active_entities:
+                valid_inds.update(ind_map.get(ent, []))
+            if valid_inds:
+                industry_options = [i for i in industry_options if i in valid_inds]
+
         _key = "sidebar_industry_filter"
         st.session_state.setdefault(_key, list(industry_options))
         current_i = [v for v in st.session_state[_key] if v in industry_options]
@@ -538,6 +574,111 @@ def _reset_all_filters(
         st.session_state.pop(key, None)
 
     st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# URL Query Parameter Sync (State URL)
+# ---------------------------------------------------------------------------
+
+def sync_state_from_url(month_options: list[str]) -> None:
+    """Read query parameters on first load to restore analytical state."""
+    if not month_options or st.session_state.get("_url_synced"):
+        return
+    st.session_state["_url_synced"] = True
+
+    # Period presets
+    if "preset" in st.query_params:
+        p = st.query_params["preset"]
+        if p in _PRESETS:
+            st.session_state["period_preset"] = p
+
+    # Custom period dates
+    if "start_m" in st.query_params and "end_m" in st.query_params:
+        sm, em = st.query_params["start_m"], st.query_params["end_m"]
+        if sm in month_options and em in month_options:
+            s_idx = month_options.index(sm)
+            e_idx = month_options.index(em)
+            if s_idx <= e_idx:
+                st.session_state["month_start_idx"] = s_idx
+                st.session_state["month_end_idx"] = e_idx
+
+    # Comparison
+    if "compare" in st.query_params:
+        c = st.query_params["compare"]
+        if c in _COMPARE_LABELS:
+            st.session_state["compare_label"] = c
+            st.session_state["compare_mode"] = _LABEL_TO_MODE[c]
+
+    # Global filters
+    for key, param, all_opts_key in [
+        ("sidebar_entity_filter", "entity", "_all_entity_options"),
+        ("sidebar_stream_filter", "stream", "_all_stream_options"),
+        ("sidebar_industry_filter", "industry", "_all_industry_options"),
+    ]:
+        if param in st.query_params:
+            vals = st.query_params.get_all(param)
+            valid_vals = [v for v in vals if v in st.session_state.get(all_opts_key, [])]
+            if valid_vals:
+                st.session_state[key] = valid_vals
+                
+    # Currency
+    if "currency" in st.query_params:
+        curr = st.query_params["currency"]
+        if curr in ["IDR", "USD"]:
+            st.session_state["currency"] = curr
+
+
+def sync_url_from_state(month_options: list[str]) -> None:
+    """Write current session state analytical filters to URL query parameters."""
+    if not month_options:
+        return
+        
+    # Period preset
+    preset = st.session_state.get("period_preset", _DEFAULT_PRESET)
+    if preset != _DEFAULT_PRESET:
+        st.query_params["preset"] = preset
+    else:
+        st.query_params.pop("preset", None)
+        
+    # Custom dates
+    if preset == "Custom":
+        s_idx = int(st.session_state.get("month_start_idx", 0))
+        e_idx = int(st.session_state.get("month_end_idx", len(month_options) - 1))
+        # Ensure bounds
+        s_idx = max(0, min(s_idx, len(month_options) - 1))
+        e_idx = max(s_idx, min(e_idx, len(month_options) - 1))
+        st.query_params["start_m"] = month_options[s_idx]
+        st.query_params["end_m"] = month_options[e_idx]
+    else:
+        st.query_params.pop("start_m", None)
+        st.query_params.pop("end_m", None)
+        
+    # Comparison
+    cmp_label = st.session_state.get("compare_label", "Prior period")
+    if cmp_label != "Prior period":
+        st.query_params["compare"] = cmp_label
+    else:
+        st.query_params.pop("compare", None)
+
+    # Global filters
+    for key, param, all_opts_key in [
+        ("sidebar_entity_filter", "entity", "_all_entity_options"),
+        ("sidebar_stream_filter", "stream", "_all_stream_options"),
+        ("sidebar_industry_filter", "industry", "_all_industry_options"),
+    ]:
+        all_opts = st.session_state.get(all_opts_key, [])
+        vals = st.session_state.get(key, all_opts)
+        if vals and len(vals) != len(all_opts):
+            st.query_params[param] = vals
+        else:
+            st.query_params.pop(param, None)
+            
+    # Currency
+    curr = st.session_state.get("currency", "IDR")
+    if curr != "IDR":
+        st.query_params["currency"] = curr
+    else:
+        st.query_params.pop("currency", None)
 
 
 # ---------------------------------------------------------------------------
@@ -653,8 +794,12 @@ def render_active_filter_bar(
     # Comparison mode
     mode = st.session_state.get("compare_mode", "Prior Month")
     if mode != "None":
-        mode_label = _MODE_TO_LABEL.get(mode, mode)
-        chips.append((f"vs {mode_label}", False))
+        resolved_label = st.session_state.get("_resolved_compare_label")
+        if resolved_label:
+            chips.append((f"vs {resolved_label}", False))
+        else:
+            mode_label = _MODE_TO_LABEL.get(mode, mode)
+            chips.append((f"vs {mode_label}", False))
 
     # Entity filter — only if a subset is selected
     entities = st.session_state.get("entity_filter") or st.session_state.get("sidebar_entity_filter")
@@ -695,11 +840,21 @@ def render_active_filter_bar(
 
     # ── Build HTML ───────────────────────────────────────────────────────
     _primary = (
-        f"display:inline-flex;align-items:center;"
-        f"background:{BLITZ_COLORS['pale_blue']};"
-        f"border:1px solid {BLITZ_COLORS['light_blue']};"
-        f"border-radius:20px;padding:3px 11px;"
+        f"display:inline-flex;align-items:center;gap:4px;"
+        f"background:{BLITZ_COLORS['primary']};"
+        f"border:1px solid {BLITZ_COLORS['primary_hover']};"
+        f"border-radius:20px;padding:3px 12px;"
         f"font-size:11.5px;font-weight:700;"
+        f"color:#FFFFFF;white-space:nowrap;"
+        f"box-shadow:0 1px 4px rgba(0,185,242,0.25);"
+    )
+    # Comparison chip — distinct dotted deep-blue style
+    _compare = (
+        f"display:inline-flex;align-items:center;gap:4px;"
+        f"background:{BLITZ_COLORS['pale_blue']};"
+        f"border:1.5px dashed {BLITZ_COLORS['primary_hover']};"
+        f"border-radius:20px;padding:3px 10px;"
+        f"font-size:11px;font-weight:600;"
         f"color:{BLITZ_COLORS['deep_blue']};white-space:nowrap;"
     )
     _secondary = (
@@ -711,23 +866,33 @@ def render_active_filter_bar(
         f"color:{BLITZ_COLORS['text_secondary']};white-space:nowrap;"
     )
 
-    chip_html = "".join(
-        f"<span style='{_primary if primary else _secondary}'>{escape(text)}</span>"
-        for text, primary in chips
-    )
+    chip_html = ""
+    for i, (text, primary) in enumerate(chips):
+        # Second chip is the comparison chip if mode is active
+        is_compare = (i == 1 and not primary and text.startswith("vs "))
+        if primary:
+            chip_html += f"<span style='{_primary}'>📅 {escape(text)}</span>"
+        elif is_compare:
+            chip_html += f"<span style='{_compare}'>⇄ {escape(text)}</span>"
+        else:
+            chip_html += f"<span style='{_secondary}'>{escape(text)}</span>"
 
-    viewing_label = (
-        f"<span style='font-size:11px;color:{BLITZ_COLORS['text_secondary']};"
-        f"font-weight:500;flex-shrink:0;'>Viewing:</span>"
+    context_label = (
+        f"<span style='font-size:10px;color:{BLITZ_COLORS['text_secondary']};"
+        f"font-weight:700;letter-spacing:0.07em;text-transform:uppercase;"
+        f"flex-shrink:0;'>Context</span>"
+        f"<span style='color:{BLITZ_COLORS['border']};margin:0 4px;'>|</span>"
     )
 
     st.markdown(
         f"<div style='display:flex;align-items:center;flex-wrap:wrap;gap:6px;"
-        f"padding:8px 0 12px;border-bottom:1px solid {BLITZ_COLORS['border']};"
-        f"margin-bottom:14px;'>"
-        f"{viewing_label} {chip_html}</div>",
+        f"padding:8px 12px 10px;background:{BLITZ_COLORS['white']};"
+        f"border:1px solid {BLITZ_COLORS['border']};border-radius:10px;"
+        f"margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,0.04);'>"
+        f"{context_label} {chip_html}</div>",
         unsafe_allow_html=True,
     )
+
 
 
 # ---------------------------------------------------------------------------
@@ -735,8 +900,8 @@ def render_active_filter_bar(
 # ---------------------------------------------------------------------------
 
 def render_empty_state(
-    title: str = "No data available for the selected period.",
-    suggestion: str = "Try expanding the date range or adjusting the filters.",
+    title: str = "No data available for the selected filters.",
+    suggestion: str = "Try expanding the reporting period or changing the selected filters.",
     icon: str = "📭",
     show_reset: bool = True,
     key_suffix: str = "",

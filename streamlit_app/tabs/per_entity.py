@@ -365,11 +365,13 @@ def _render_entity_comparison(
     col_widths_yoy  = ["14%", "12%", "12%", "10%", "10%", "8%", "8%", "8%", "8%"]
     col_widths = col_widths_yoy if yoy_col_available else col_widths_base
 
-    thead = "".join(
-        f"<th style='padding:7px 8px;text-align:{'left' if i == 0 else 'right'};font-size:11px;"
-        f"font-weight:600;color:{BLITZ_COLORS['text_secondary']};width:{col_widths[i]};'>{h}</th>"
-        for i, h in enumerate(col_headers)
-    )
+    thead = ""
+    for i, h in enumerate(col_headers):
+        align = "left" if i == 0 else "right"
+        thead += (
+            f"<th style='padding:6px 12px;text-align:{align};font-size:11px;"
+            f"font-weight:600;color:{BLITZ_COLORS['text_secondary']};width:{col_widths[i]};'>{h}</th>"
+        )
 
     tbody = ""
     for i, (entity, df) in enumerate(entity_frames.items()):
@@ -378,7 +380,7 @@ def _render_entity_comparison(
             f"<span style='display:inline-block;width:8px;height:8px;border-radius:50%;"
             f"background:{ENTITY_COLORS.get(entity, BLITZ_COLORS['primary'])};margin-right:6px;'></span>"
         )
-        cells = f"<td style='padding:8px;font-size:12px;font-weight:700;color:{BLITZ_COLORS['text_primary']};'>{dot}{entity}</td>"
+        cells = f"<td style='padding:6px 12px;font-size:12px;font-weight:700;color:{BLITZ_COLORS['text_primary']};border-bottom:1px solid {border};'>{dot}{entity}</td>"
 
         rev = _val(df, "Total Gross Revenue", latest_month)
         prior_rev = _val(df, "Total Gross Revenue", prior_month) if prior_month else None
@@ -388,8 +390,8 @@ def _render_entity_comparison(
             val_str = fmt_display(cur) if cur is not None else "—"
             color = BLITZ_COLORS["text_primary"] if cur is None or cur >= 0 else "#CF222E"
             cells += (
-                f"<td style='padding:8px;text-align:right;font-size:12px;font-weight:600;"
-                f"color:{color};'>{val_str}</td>"
+                f"<td style='padding:6px 12px;text-align:right;font-size:12px;font-weight:600;"
+                f"color:{color};border-bottom:1px solid {border};'>{val_str}</td>"
             )
 
         # EBITDA margin from ratios
@@ -439,21 +441,21 @@ def _render_entity_comparison(
                 yoy_str = "N/A"
 
         cells += (
-            f"<td style='padding:8px;text-align:right;font-size:12px;color:{BLITZ_COLORS['text_secondary']};'>{ebitda_m_str}</td>"
-            f"<td style='padding:8px;text-align:right;font-size:12px;color:{BLITZ_COLORS['text_secondary']};'>{contrib_str}</td>"
-            f"<td style='padding:8px;text-align:right;font-size:12px;font-weight:600;color:{mom_color};'>{mom_str}</td>"
+            f"<td style='padding:6px 12px;text-align:right;font-size:12px;color:{BLITZ_COLORS['text_secondary']};border-bottom:1px solid {border};'>{ebitda_m_str}</td>"
+            f"<td style='padding:6px 12px;text-align:right;font-size:12px;color:{BLITZ_COLORS['text_secondary']};border-bottom:1px solid {border};'>{contrib_str}</td>"
+            f"<td style='padding:6px 12px;text-align:right;font-size:12px;font-weight:600;color:{mom_color};border-bottom:1px solid {border};'>{mom_str}</td>"
         )
         if yoy_col_available:
             cells += (
-                f"<td style='padding:8px;text-align:right;font-size:12px;font-weight:600;color:{yoy_color};'>{yoy_str}</td>"
+                f"<td style='padding:6px 12px;text-align:right;font-size:12px;font-weight:600;color:{yoy_color};border-bottom:1px solid {border};'>{yoy_str}</td>"
             )
         tbody += f"<tr style='background:{bg};'>{cells}</tr>"
 
     st.markdown(
-        f"<table style='width:100%;border-collapse:collapse;border:1px solid {border};"
-        f"border-radius:8px;overflow:hidden;'>"
-        f"<thead style='background:{header_bg};'><tr>{thead}</tr></thead>"
-        f"<tbody>{tbody}</tbody></table>",
+        f"<div style='border:1px solid {border};border-radius:8px;overflow:hidden;'>"
+        f"<table style='width:100%;border-collapse:collapse;'>"
+        f"<thead style='background:{header_bg};border-bottom:2px solid {border};'><tr>{thead}</tr></thead>"
+        f"<tbody>{tbody}</tbody></table></div>",
         unsafe_allow_html=True,
     )
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)

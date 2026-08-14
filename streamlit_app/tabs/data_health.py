@@ -443,20 +443,15 @@ def _render_exceptions(df: pd.DataFrame, threshold: float) -> None:
 
     border = BLITZ_COLORS["border"]
     thead = (
-        f"<tr style='background:{BLITZ_COLORS['pale_blue']};'>"
+        f"<tr>"
         + "".join(
-            f"<th style='padding:8px 10px;text-align:{a};font-size:11px;font-weight:700;"
+            f"<th style='padding:6px 12px;text-align:{a};font-size:11px;font-weight:700;"
             f"color:{BLITZ_COLORS['text_secondary']};white-space:nowrap;'>{h}</th>"
             for h, a in [
-                ("Reconciliation Check", "left"),
-                ("Period", "left"),
-                ("Source Row", "left"),
-                ("Variance", "right"),
-                ("Absolute Variance", "right"),
-                ("Severity", "center"),
+                ("Category", "left"), ("Month", "left"), ("Check", "left"),
+                ("Variance", "right"), ("|Variance|", "right"), ("Severity", "center")
             ]
-        )
-        + "</tr>"
+        ) + "</tr>"
     )
 
     tbody = ""
@@ -471,24 +466,25 @@ def _render_exceptions(df: pd.DataFrame, threshold: float) -> None:
         delta_color = _C_CRITICAL if row["Delta"] < 0 else _C_ATTENTION
         tbody += (
             f"<tr style='background:{sb};'>"
-            f"<td style='padding:9px 10px;font-size:12px;font-weight:600;"
-            f"color:{BLITZ_COLORS['text_primary']};'>{row['Category']}</td>"
-            f"<td style='padding:9px 10px;font-size:12px;color:{BLITZ_COLORS['text_secondary']};'>"
+            f"<td style='padding:6px 12px;font-size:12px;font-weight:600;"
+            f"color:{BLITZ_COLORS['text_primary']};border-bottom:1px solid {border};'>{row['Category']}</td>"
+            f"<td style='padding:6px 12px;font-size:12px;color:{BLITZ_COLORS['text_secondary']};border-bottom:1px solid {border};'>"
             f"{row['Month']}</td>"
-            f"<td style='padding:9px 10px;font-size:11px;color:{BLITZ_COLORS['text_secondary']};'>"
+            f"<td style='padding:6px 12px;font-size:11px;color:{BLITZ_COLORS['text_secondary']};border-bottom:1px solid {border};'>"
             f"{row['Label']}</td>"
-            f"<td style='padding:9px 10px;text-align:right;font-size:12px;font-weight:600;"
-            f"color:{delta_color};'>{fmt_idr(row['Delta'])}</td>"
-            f"<td style='padding:9px 10px;text-align:right;font-size:12px;font-weight:700;"
-            f"color:{sc};'>{fmt_idr(row['AbsDelta'])}</td>"
-            f"<td style='padding:9px 10px;text-align:center;'>{sev_badge}</td>"
+            f"<td style='padding:6px 12px;text-align:right;font-size:12px;font-weight:600;"
+            f"color:{delta_color};border-bottom:1px solid {border};'>{fmt_idr(row['Delta'])}</td>"
+            f"<td style='padding:6px 12px;text-align:right;font-size:12px;font-weight:700;"
+            f"color:{sc};border-bottom:1px solid {border};'>{fmt_idr(row['AbsDelta'])}</td>"
+            f"<td style='padding:6px 12px;text-align:center;border-bottom:1px solid {border};'>{sev_badge}</td>"
             f"</tr>"
         )
 
     st.markdown(
-        f"<table style='width:100%;border-collapse:collapse;border:1px solid {border};"
-        f"border-radius:10px;overflow:hidden;'>"
-        f"<thead>{thead}</thead><tbody>{tbody}</tbody></table>",
+        f"<div style='border:1px solid {border};border-radius:10px;overflow:hidden;'>"
+        f"<table style='width:100%;border-collapse:collapse;'>"
+        f"<thead style='background:{BLITZ_COLORS['pale_blue']};border-bottom:2px solid {border};'>"
+        f"{thead}</thead><tbody>{tbody}</tbody></table></div>",
         unsafe_allow_html=True,
     )
     st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)

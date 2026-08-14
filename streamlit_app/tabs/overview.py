@@ -1,18 +1,20 @@
-"""Executive overview tab — full executive intelligence dashboard.
+"""Executive overview tab — Power BI-inspired executive intelligence dashboard.
 
 Information hierarchy:
-    Row 0 → Period context header
-    Row 1 → 8-KPI hero band (Gross Rev, Net Rev, Gross Profit, EBITDA, Net P/L,
-              EBITDA Margin %, MoM Growth %, Top-5 Concentration)
-    Row 2 → Auto-generated insight chips (data-driven, no LLM)
-    Row 3 → Entity performance table | Revenue stream ranking | Client concentration
-    Row 4 → Revenue by entity (multi-line) | P&L waterfall
+    Header
+    Active filter/context bar
+    Primary KPI cards (8 metrics)
+    Margin/growth KPI row (5 metrics)
+    Entity KPIs & Business KPIs
+    Revenue trend | P&L waterfall
+    Executive insights
 """
 
 from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+import plotly.graph_objects as go
 
 from streamlit_app.data.parsers import parse_master, parse_pl_sheet, parse_ratios
 from streamlit_app.data.loader import parse_all_entity_sheets
@@ -24,8 +26,11 @@ from streamlit_app.data.analytics import (
 from streamlit_app.components.charts import (
     annotated_trend_chart,
     entity_revenue_line_chart,
+    pareto_chart,
     render_plotly_chart,
+    variance_bar_chart,
     waterfall_chart,
+    apply_blitz_chart_theme,
 )
 from streamlit_app.components.filters import (
     drill_to_entity,
@@ -34,8 +39,19 @@ from streamlit_app.components.filters import (
     get_filtered_months,
     render_active_filter_bar,
     render_empty_state,
+    get_active_currency,
 )
-from streamlit_app.components.ui import render_page_header, render_section_safe
+from streamlit_app.components.ui import (
+    render_chart_card, 
+    render_page_header, 
+    render_section_safe,
+    get_kpi_layout,
+    render_insight_card,
+    fmt_percent,
+    fmt_variance,
+)
+from streamlit_app.components.kpi_cards import render_bi_kpi_card
+
 from streamlit_app.constants import (
     BLITZ_COLORS,
     ENTITY_COLORS,
@@ -45,7 +61,6 @@ from streamlit_app.constants import (
     fmt_idr_full,
 )
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Public render
 # ─────────────────────────────────────────────────────────────────────────────
@@ -53,9 +68,9 @@ from streamlit_app.constants import (
 def render(sheets: dict[str, pd.DataFrame]) -> None:
     """Render the executive overview — management decision landing page."""
     render_page_header(
-        "Executive overview",
-        "Understand revenue, profitability, growth drivers, concentration risk, and reporting quality at a glance.",
-        eyebrow="Management cockpit",
+        "Executive Summary",
+        "Top-level financial performance, profitability, and growth drivers.",
+        eyebrow="Management Cockpit",
     )
     raw_cons = sheets.get("Consolidated Summary")
     if raw_cons is None:
@@ -68,72 +83,68 @@ def render(sheets: dict[str, pd.DataFrame]) -> None:
         return
 
     all_months: list[str] = (
-        cons_long.drop_duplicates("Month").sort_values("MonthDate")["Month"].tolist()
+        cons_long.drop_duplicates("Month").sort_values(by="MonthDate")["Month"].tolist()
     )
     filtered_months = get_filtered_months(all_months)
     if not filtered_months:
         render_empty_state(
-            title="No months in the selected date range.",
-            suggestion="Adjust the month range slider in the sidebar to include at least one period.",
-            icon="📅",
-            show_reset=True,
-            key_suffix="overview",
+            title="NO DATA FOR CURRENT FILTERS",
+            suggestion="Try expanding the reporting period or changing the selected filters.",
         )
         return
-
-    # ── Active filter context bar ─────────────────────────────────────────
-    render_active_filter_bar(filtered_months)
 
     latest_month = filtered_months[-1]
     prior_month = get_compare_month(filtered_months, latest_month, all_months)
 
-    # Pre-compute all entity frames ONCE — shared by insight chips, entity
-    # performance table, and revenue trend chart.  Eliminates 6+ redundant
-    # parse_pl_sheet cache lookups per render cycle.
+    # ── Top Filter Bar ───────────────────────────────────────────────
+    _render_top_filter_bar(all_months)
+
+    # ── Active Context Bar ─────────────────────────────────────────
+    _render_active_context(latest_month, prior_month, filtered_months)
+    
+    st.markdown("<div style='margin-bottom: 24px;'></div>", unsafe_allow_html=True)
+
+    # Pre-compute
     wb_hash = st.session_state.get("_wb_hash", "")
     entity_frames = parse_all_entity_sheets(wb_hash, sheets, granularity="Summary")
+    kpis = _compute_kpis(cons_long, raw_cons, sheets, latest_month, prior_month, all_months, entity_frames)
 
-    # Pre-compute all values once
-    kpis = _compute_kpis(cons_long, raw_cons, sheets, latest_month, prior_month, entity_frames)
+    # A. Executive KPI Summary
+    st.markdown("### Executive Summary")
+    render_section_safe(_render_primary_kpis, kpis, cons_long, latest_month, prior_month, section_name="Executive Summary")
 
-    # ── Row 0: Section header ────────────────────────────────────────────
-    render_section_safe(_render_header, latest_month, prior_month, filtered_months,
-                        section_name="Period Header")
+    # B. Margins & Growth
+    st.markdown("### Margins & Growth")
+    render_section_safe(_render_margin_growth_kpis, kpis, cons_long, latest_month, section_name="Margins & Growth")
 
-    # ── Row 1: 8-KPI hero band ───────────────────────────────────────────
-    render_section_safe(_render_kpi_band, kpis, cons_long, filtered_months,
-                        section_name="KPI Band")
+    # C. Business Snapshot
+    st.markdown("### Business Snapshot")
+    render_section_safe(_render_entity_business_kpis, kpis, entity_frames, latest_month, section_name="Business Snapshot")
 
-    # ── Row 2: Executive insight chips ──────────────────────────────────
-    render_section_safe(_render_insight_chips, kpis, sheets, filtered_months, latest_month, prior_month,
-                        entity_frames=entity_frames,
-                        section_name="Insight Chips")
+    # D. Revenue & Composition
+    col_r1, col_r2 = st.columns([2, 1], gap="medium")
+    with col_r1:
+        st.markdown("### Revenue Performance")
+        _render_gross_revenue_trend(cons_long, all_months, filtered_months)
+    with col_r2:
+        st.markdown("### Revenue Composition")
+        _render_entity_donut(entity_frames, filtered_months)
 
-    # ── Drill-down navigation strip ──────────────────────────────────────
-    render_section_safe(_render_drill_strip, sheets, latest_month,
-                        section_name="Drill-Down Strip")
+    # E. Profitability & Mix
+    col_p1, col_p2 = st.columns([2, 1], gap="medium")
+    with col_p1:
+        st.markdown("### Profitability Performance")
+        _render_profitability_trend(cons_long, filtered_months)
+    with col_p2:
+        st.markdown("### Revenue Mix")
+        raw_master = sheets.get("MASTER")
+        from streamlit_app.data.parsers import parse_master
+        master_df, _ = parse_master(raw_master) if raw_master is not None else (pd.DataFrame(), [])
+        _render_stream_donut(master_df, filtered_months)
 
-    # ── Row 3: Entity perf | Stream ranking | Client concentration ───────
-    col_entity, col_stream, col_conc = st.columns([4, 3, 3], gap="medium")
-    with col_entity:
-        render_section_safe(_render_entity_performance, entity_frames, sheets, latest_month, prior_month,
-                            section_name="Entity Performance")
-    with col_stream:
-        render_section_safe(_render_stream_ranking, sheets, latest_month, prior_month,
-                            section_name="Stream Ranking")
-    with col_conc:
-        render_section_safe(_render_concentration, sheets, filtered_months,
-                            section_name="Client Concentration")
-
-    # ── Row 4: Revenue trend | Waterfall ─────────────────────────────────
-    col_trend, col_wf = st.columns([3, 2], gap="medium")
-    with col_trend:
-        render_section_safe(_render_entity_revenue_trend, entity_frames, filtered_months,
-                            section_name="Revenue by Entity")
-    with col_wf:
-        render_section_safe(_render_waterfall, cons_long, latest_month,
-                            section_name="P&L Waterfall")
-
+    # F. P&L Bridge
+    st.markdown("### P&L Bridge")
+    _render_waterfall()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data helpers
@@ -143,23 +154,20 @@ def _get(df: pd.DataFrame, metric: str, month: str) -> float | None:
     rows = df[(df["Metric"] == metric) & (df["Month"] == month)]
     return float(rows["Value"].sum(skipna=True)) if not rows.empty else None
 
-
 def _delta_pct(cur: float | None, prior: float | None) -> float | None:
     if cur is None or prior is None or prior == 0:
         return None
-    return (cur - prior) / abs(prior) * 100
+    return (cur - prior) / abs(prior)
 
-
-def _delta_str(cur: float | None, prior: float | None) -> str | None:
-    d = _delta_pct(cur, prior)
-    return f"{d:+.1f}%" if d is not None else None
-
-
-def _sparkline(df: pd.DataFrame, metric: str) -> list[float]:
+def _sparkline(df: pd.DataFrame, metric: str) -> list[float] | None:
     rows = df[df["Metric"] == metric]
-    agg = rows.groupby("MonthDate", as_index=False)["Value"].sum().sort_values("MonthDate")
-    return [float(v) for v in agg["Value"].tail(12).tolist()]
-
+    if rows.empty:
+        return None
+    agg = rows.groupby("MonthDate", as_index=False).agg({"Value": "sum"}).sort_values(by="MonthDate")
+    vals = [float(v) for v in agg["Value"].tail(12).tolist()]
+    if len(vals) < 2:
+        return None
+    return vals
 
 def _compute_kpis(
     cons_long: pd.DataFrame,
@@ -167,690 +175,497 @@ def _compute_kpis(
     sheets: dict[str, pd.DataFrame],
     latest: str,
     prior: str | None,
+    all_months: list[str],
     entity_frames: dict[str, pd.DataFrame] | None = None,
 ) -> dict:
-    gross_rev = _get(cons_long, "Total Gross Revenue", latest)
-    net_rev = _get(cons_long, "Net Revenue", latest)
-    gross_profit = _get(cons_long, "Gross Profit 2", latest)
-    ebitda = _get(cons_long, "EBITDA", latest)
-    net_pl = _get(cons_long, "NET PROFIT/LOSS (Before Tax)", latest)
-
-    prior_gross_rev = _get(cons_long, "Total Gross Revenue", prior) if prior else None
-    prior_net_rev = _get(cons_long, "Net Revenue", prior) if prior else None
-    prior_gross_profit = _get(cons_long, "Gross Profit 2", prior) if prior else None
-    prior_ebitda = _get(cons_long, "EBITDA", prior) if prior else None
-    prior_net_pl = _get(cons_long, "NET PROFIT/LOSS (Before Tax)", prior) if prior else None
-
+    
+    # 1. Base P&L Metrics
+    metrics = [
+        "Total Gross Revenue", "Net Revenue", "Total COGS", 
+        "Gross Profit 1", "Gross Profit 2", "Total Operating Expenses", 
+        "EBITDA", "NET PROFIT/LOSS (Before Tax)"
+    ]
+    
+    kpi_dict = {}
+    for m in metrics:
+        cur_val = _get(cons_long, m, latest)
+        pri_val = _get(cons_long, m, prior) if prior else None
+        
+        variance_abs = (cur_val - pri_val) if (cur_val is not None and pri_val is not None) else None
+        variance_pct = _delta_pct(cur_val, pri_val)
+        
+        # Determine direction
+        direction = "flat"
+        if variance_abs and variance_abs > 0:
+            direction = "up"
+        elif variance_abs and variance_abs < 0:
+            direction = "down"
+            
+        # Determine semantic status
+        # For COGS and OPEX, down is positive. For Revenue/Profit, up is positive.
+        status = "neutral"
+        if variance_abs is not None:
+            if m in ("Total COGS", "Total Operating Expenses"):
+                status = "positive" if variance_abs <= 0 else "negative"
+            else:
+                status = "positive" if variance_abs >= 0 else "negative"
+                
+        kpi_dict[m] = {
+            "cur": cur_val,
+            "pri": pri_val,
+            "var_abs": variance_abs,
+            "var_pct": variance_pct,
+            "direction": direction,
+            "status": status,
+            "sparkline_data": _sparkline(cons_long, m)
+        }
+        
+    # 2. Margins
     ratios = parse_ratios(raw_cons, "Consolidated")
-    ebitda_margin: float | None = None
-    prior_ebitda_margin: float | None = None
-    if not ratios.empty:
-        m_rows = ratios[ratios["Metric"].str.lower().str.contains("ebitda margin")]
-        if not m_rows.empty:
-            cur_r = m_rows[m_rows["Month"] == latest]
-            ebitda_margin = float(cur_r["Value"].sum()) * 100 if not cur_r.empty else None
-            if prior:
-                pri_r = m_rows[m_rows["Month"] == prior]
-                prior_ebitda_margin = float(pri_r["Value"].sum()) * 100 if not pri_r.empty else None
-
-    mom_growth = _delta_pct(gross_rev, prior_gross_rev)
-
-    top5_pct: float | None = None
-    top5_clients: list[dict] = []
+    margins = ["Gross Margin %", "Operating Margin %", "EBITDA Margin %"]
+    for m in margins:
+        val = None
+        pri_val = None
+        if not ratios.empty:
+            m_rows = ratios[ratios["Metric"].str.lower() == m.lower()]
+            if not m_rows.empty:
+                cur_r = m_rows[m_rows["Month"] == latest]
+                if not cur_r.empty:
+                    val = float(cur_r["Value"].sum())
+                if prior:
+                    pri_r = m_rows[m_rows["Month"] == prior]
+                    if not pri_r.empty:
+                        pri_val = float(pri_r["Value"].sum())
+                        
+        if m == "Gross Margin %" and val is None:
+            gp1_cur = kpi_dict.get("Gross Profit 1", {}).get("cur")
+            rev_cur = kpi_dict.get("Net Revenue", {}).get("cur")
+            if isinstance(gp1_cur, (int, float)) and isinstance(rev_cur, (int, float)) and rev_cur != 0:
+                val = gp1_cur / rev_cur
+                
+            gp1_pri = kpi_dict.get("Gross Profit 1", {}).get("pri")
+            rev_pri = kpi_dict.get("Net Revenue", {}).get("pri")
+            if isinstance(gp1_pri, (int, float)) and isinstance(rev_pri, (int, float)) and rev_pri != 0:
+                pri_val = gp1_pri / rev_pri
+                        
+        var_abs = (val - pri_val) if (val is not None and pri_val is not None) else None
+        direction = "flat"
+        if var_abs and var_abs > 0: direction = "up"
+        elif var_abs and var_abs < 0: direction = "down"
+        
+        status = "neutral"
+        if var_abs is not None:
+            status = "positive" if var_abs >= 0 else "negative"
+            
+        kpi_dict[m] = {
+            "cur": val,
+            "pri": pri_val,
+            "var_abs": var_abs, # For margins, this is pp difference
+            "direction": direction,
+            "status": status,
+        }
+        
+    # 3. Growth (MoM and YoY)
+    try:
+        idx = all_months.index(latest)
+    except ValueError:
+        idx = len(all_months) - 1
+        
+    month_ly = all_months[idx - 12] if idx >= 12 else None
+    month_lm = all_months[idx - 1] if idx >= 1 else None
+    
+    gr_cur = kpi_dict["Total Gross Revenue"]["cur"]
+    gr_lm = _get(cons_long, "Total Gross Revenue", month_lm) if month_lm else None
+    gr_ly = _get(cons_long, "Total Gross Revenue", month_ly) if month_ly else None
+    
+    mom = _delta_pct(gr_cur, gr_lm)
+    yoy = _delta_pct(gr_cur, gr_ly)
+    
+    kpi_dict["growth"] = {
+        "mom": mom,
+        "yoy": yoy,
+        "mom_status": "positive" if (mom and mom >= 0) else "negative",
+        "yoy_status": "positive" if (yoy and yoy >= 0) else "negative",
+        "month_lm": month_lm,
+        "month_ly": month_ly,
+    }
+    
+    # 4. Business KPIs (Active Client Count, Top Stream)
+    active_clients = 0
+    top_stream = "N/A"
+    top_stream_pct = 0.0
+    
+    # Try to compute Active Clients from MASTER if it exists
     raw_master = sheets.get("MASTER")
     if raw_master is not None:
+        from streamlit_app.data.parsers import parse_master
         master, missing = parse_master(raw_master)
         if not missing and not master.empty:
-            total = master["Amount (IDR)"].sum()
-            if total > 0:
-                by_client = master.groupby("Client (clean)")["Amount (IDR)"].sum().sort_values(ascending=False)
-                top5_rev = by_client.head(5).sum()
-                top5_pct = top5_rev / total * 100
-                for name, rev in by_client.head(5).items():
-                    top5_clients.append({"name": name, "rev": float(rev), "pct": float(rev / total * 100)})
-
-    return {
-        "gross_rev": gross_rev, "prior_gross_rev": prior_gross_rev,
-        "net_rev": net_rev, "prior_net_rev": prior_net_rev,
-        "gross_profit": gross_profit, "prior_gross_profit": prior_gross_profit,
-        "ebitda": ebitda, "prior_ebitda": prior_ebitda,
-        "net_pl": net_pl, "prior_net_pl": prior_net_pl,
-        "ebitda_margin": ebitda_margin, "prior_ebitda_margin": prior_ebitda_margin,
-        "mom_growth": mom_growth,
-        "top5_pct": top5_pct,
-        "top5_clients": top5_clients,
+            lm_data = master[master["Month"] == latest]
+            if not lm_data.empty:
+                active_clients = lm_data[lm_data["Amount (IDR)"] > 0]["Client (clean)"].nunique()
+                
+    # Compute Top Revenue Stream reliably from cons_long
+    streams = ["3PL", "Freight", "Mobile Selling", "EV Leasing", "COD", "Other"]
+    stream_df = cons_long[(cons_long["Metric"].isin(streams)) & (cons_long["Month"] == latest)]
+    if not stream_df.empty:
+        stream_rev = stream_df.groupby("Metric")["Value"].sum().sort_values(ascending=False)
+        total_stream_rev = stream_rev.sum()
+        if total_stream_rev > 0:
+            top_stream = stream_rev.index[0]
+            top_stream_pct = stream_rev.iloc[0] / total_stream_rev
+                    
+    kpi_dict["business"] = {
+        "active_clients": active_clients,
+        "top_stream": top_stream,
+        "top_stream_pct": top_stream_pct
     }
 
+    return kpi_dict
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Row 0: Header
+# Render Sections
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _render_header(latest: str, prior: str | None, months: list[str]) -> None:
-    compare_label = f" vs {prior}" if prior else ""
+def _render_top_filter_bar(all_months: list[str]) -> None:
+    from streamlit_app.components.filters import _PRESETS, _DEFAULT_PRESET, _apply_preset
+    from streamlit_app.components.filters import multiselect_with_all
+    
+    if "overview_period_preset" not in st.session_state:
+        st.session_state["overview_period_preset"] = st.session_state.get("period_preset", _DEFAULT_PRESET)
+    if "overview_currency" not in st.session_state:
+        st.session_state["overview_currency"] = st.session_state.get("currency", "IDR")
+        
+    with st.container(border=True):
+        col1, col2 = st.columns([2.5, 1])
+        
+        with col1:
+            st.markdown("<div style='font-size:11px;font-weight:700;margin-bottom:4px;color:#4D4D4D;text-transform:uppercase;'>Reporting Period</div>", unsafe_allow_html=True)
+            preset = st.pills("Reporting Period", options=_PRESETS, key="overview_period_preset", label_visibility="collapsed")
+            if not preset:
+                preset = _DEFAULT_PRESET
+            
+            # Sync to global state
+            if preset != st.session_state.get("period_preset"):
+                st.session_state["period_preset"] = preset
+                start_idx, end_idx = _apply_preset(preset, all_months)
+                st.session_state["month_start_idx"] = start_idx
+                st.session_state["month_end_idx"] = end_idx
+                st.rerun()
+                
+            if preset == "Custom":
+                c1, c2 = st.columns(2)
+                cur_start = int(st.session_state.get("month_start_idx", 0))
+                cur_end = int(st.session_state.get("month_end_idx", len(all_months)-1))
+                
+                with c1:
+                    s_month = st.selectbox("Start month", options=all_months, index=cur_start, key="overview_start_month")
+                with c2:
+                    s_idx = all_months.index(s_month)
+                    valid_ends = all_months[s_idx:]
+                    e_idx_rel = max(0, min(cur_end - s_idx, len(valid_ends)-1))
+                    e_month = st.selectbox("End month", options=valid_ends, index=e_idx_rel, key="overview_end_month")
+                    
+                new_start = all_months.index(s_month)
+                new_end = all_months.index(e_month)
+                if new_start != cur_start or new_end != cur_end:
+                    st.session_state["month_start_idx"] = new_start
+                    st.session_state["month_end_idx"] = new_end
+                    st.rerun()
+                    
+        with col2:
+            st.markdown("<div style='font-size:11px;font-weight:700;margin-bottom:4px;color:#4D4D4D;text-transform:uppercase;'>Currency</div>", unsafe_allow_html=True)
+            curr = st.segmented_control("Currency", options=["IDR", "USD"], key="overview_currency", label_visibility="collapsed")
+            if curr and curr != st.session_state.get("currency"):
+                st.session_state["currency"] = curr
+                st.rerun()
+                
+        # Row 2: Business Filters
+        st.markdown("<div style='margin-bottom:12px;'></div>", unsafe_allow_html=True)
+        bc1, bc2, bc3 = st.columns(3)
+        with bc1:
+            multiselect_with_all("Entity", st.session_state.get("_all_entity_options", []), "entity_filter")
+        with bc2:
+            multiselect_with_all("Revenue Stream", st.session_state.get("_all_stream_options", []), "stream_filter")
+        with bc3:
+            multiselect_with_all("Industry", st.session_state.get("_all_industry_options", []), "industry_filter")
+
+def _render_active_context(latest: str, prior: str | None, months: list[str]) -> None:
+    from html import escape
     n_months = len(months)
     period_label = f"{months[0]} – {latest}" if n_months > 1 else latest
-    st.caption(
-        f"Latest reporting period: **{latest}**{compare_label} · "
-        f"Selected period: {period_label} ({n_months} month{'s' if n_months != 1 else ''})"
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Row 1: 8-KPI hero band
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _render_kpi_band(kpis: dict, cons_long: pd.DataFrame, filtered_months: list[str]) -> None:
-    c1, c2, c3, c4 = st.columns(4, gap="small")
-    with c1:
-        _kpi_card("Gross Revenue", kpis["gross_rev"], kpis["prior_gross_rev"],
-                  sparkline=_sparkline(cons_long, "Total Gross Revenue"),
-                  help_text="Total Gross Revenue from Consolidated Summary")
-    with c2:
-        _kpi_card("Net Revenue", kpis["net_rev"], kpis["prior_net_rev"],
-                  sparkline=_sparkline(cons_long, "Net Revenue"))
-    with c3:
-        _kpi_card("Gross Profit", kpis["gross_profit"], kpis["prior_gross_profit"],
-                  sparkline=_sparkline(cons_long, "Gross Profit 2"))
-    with c4:
-        growth = kpis["mom_growth"]
-        st.metric(
-            label="Revenue Growth MoM",
-            value=f"{growth:+.1f}%" if growth is not None else "N/A",
-            border=True,
-            help="Month-on-month change in Total Gross Revenue",
-        )
-
-    c5, c6, c7, c8 = st.columns(4, gap="small")
-    with c5:
-        _kpi_card("EBITDA", kpis["ebitda"], kpis["prior_ebitda"],
-                  sparkline=_sparkline(cons_long, "EBITDA"),
-                  help_text="Earnings before interest, tax, depreciation & amortisation")
-    with c6:
-        _kpi_card("Net Profit / Loss", kpis["net_pl"], kpis["prior_net_pl"],
-                  sparkline=_sparkline(cons_long, "NET PROFIT/LOSS (Before Tax)"))
-    with c7:
-        margin = kpis["ebitda_margin"]
-        prior_m = kpis["prior_ebitda_margin"]
-        st.metric(
-            label="EBITDA Margin %",
-            value=f"{margin:.1f}%" if margin is not None else "N/A",
-            delta=_delta_str(margin, prior_m),
-            border=True,
-            help="EBITDA as % of Gross Revenue",
-        )
-    with c8:
-        top5 = kpis["top5_pct"]
-        high_risk = top5 is not None and top5 > 60
-        st.metric(
-            label="Top-5 Client Concentration",
-            value=f"{top5:.1f}%" if top5 is not None else "N/A",
-            border=True,
-            help="Top 5 clients' combined share of all-time total revenue. Above 60% = high risk.",
-            delta=":material/warning: High risk" if high_risk else None,
-            delta_color="inverse" if high_risk else "normal",
-        )
-
-
-def _kpi_card(
-    label: str,
-    value: float | None,
-    prior: float | None,
-    sparkline: list[float] | None = None,
-    help_text: str | None = None,
-) -> None:
-    delta = _delta_str(value, prior)
-    st.metric(
-        label=label,
-        value=fmt_display(value) if value is not None else "N/A",
-        delta=delta,
-        border=True,
-        chart_data=sparkline if sparkline and len(sparkline) > 1 else None,
-        chart_type="line",
-        help=help_text or (f"Prior period: {fmt_display(prior)}" if prior is not None else None),
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Row 2: Executive insight chips
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _render_insight_chips(
-    kpis: dict,
-    sheets: dict[str, pd.DataFrame],
-    filtered_months: list[str],
-    latest: str,
-    prior: str | None,
-    entity_frames: dict[str, pd.DataFrame] | None = None,
-) -> None:
-    insights: list[tuple[str, str, str]] = []
-
-    # Revenue direction
-    growth = kpis["mom_growth"]
-    if growth is not None and prior:
-        if growth > 0:
-            insights.append((":material/trending_up:", BLITZ_COLORS["primary"],
-                f"Revenue grew **{growth:+.1f}%** MoM ({prior} → {latest})"))
-        else:
-            insights.append((":material/trending_down:", "#CF222E",
-                f"Revenue declined **{growth:+.1f}%** MoM ({prior} → {latest})"))
-
-    # EBITDA margin signal
-    margin = kpis["ebitda_margin"]
-    prior_margin = kpis["prior_ebitda_margin"]
-    if margin is not None:
-        if margin < 0:
-            label = "EBITDA margin remains negative"
-            if prior_margin is not None:
-                diff = margin - prior_margin
-                direction = "improved" if diff > 0 else "worsened"
-                label += f" ({direction} {abs(diff):.1f}pp vs prior)"
-            insights.append((":material/warning:", "#BF8700", label + "."))
-        else:
-            label = f"EBITDA margin positive at **{margin:.1f}%**"
-            if prior_margin is not None:
-                label += f" ({margin - prior_margin:+.1f}pp vs prior)"
-            insights.append((":material/check_circle:", BLITZ_COLORS["primary_hover"], label + "."))
-
-    # Leading entity — use pre-computed entity_frames if available
-    top_entity: str | None = None
-    top_entity_rev: float = 0
-    frames_to_check = entity_frames or {}
-    for entity, df in frames_to_check.items():
-        row = df[(df["Metric"] == "Total Gross Revenue") & (df["Month"] == latest)]
-        rev = float(row["Value"].sum()) if not row.empty else 0
-        if rev > top_entity_rev:
-            top_entity_rev = rev
-            top_entity = entity
-    if top_entity:
-        insights.append((":material/apartment:", BLITZ_COLORS["primary"],
-            f"**{top_entity}** leads group revenue at **{fmt_idr(top_entity_rev)}** in {latest}."))
-
-    # Top revenue stream from MASTER
-    raw_master = sheets.get("MASTER")
-    if raw_master is not None:
-        master, missing = parse_master(raw_master)
-        if not missing and not master.empty:
-            vis = master[master["Month"].isin(filtered_months)]
-            if not vis.empty:
-                stream_rev = vis.groupby("Rev Stream")["Amount (IDR)"].sum().sort_values(ascending=False)
-                if not stream_rev.empty:
-                    top_stream = stream_rev.index[0]
-                    top_pct = stream_rev.iloc[0] / stream_rev.sum() * 100
-                    insights.append((":material/donut_small:", BLITZ_COLORS["deep_blue"],
-                        f"**{top_stream}** is the dominant revenue stream "
-                        f"(**{top_pct:.0f}%** of group revenue in period)."))
-
-    # Concentration risk
-    top5 = kpis["top5_pct"]
-    if top5 is not None:
-        if top5 > 60:
-            insights.append((":material/groups:", "#CF222E",
-                f"Concentration at **{top5:.1f}%** — top 5 clients account for over 60% of revenue."))
-        elif top5 > 40:
-            insights.append((":material/groups:", "#BF8700",
-                f"Concentration at **{top5:.1f}%** — monitor client dependency risk."))
-
-    # Data health flags
-    raw_tie = sheets.get("TIE-OUT CHECK")
-    if raw_tie is not None:
-        from streamlit_app.data.parsers import parse_tie_out
-        tie = parse_tie_out(raw_tie)
-        if not tie.empty:
-            flagged = tie[tie["Delta"].abs() > 1_000_000]
-            if not flagged.empty:
-                insights.append((":material/report:", "#CF222E",
-                    f"**{len(flagged)} reconciliation flag{'s' if len(flagged) != 1 else ''}** "
-                    f"detected — review Data Health tab."))
-
-    # Anomaly signals from the selected period
-    if filtered_months and len(filtered_months) >= 2:
-        raw_cons_local = sheets.get("Consolidated Summary")
-        if raw_cons_local is not None:
-            from streamlit_app.data.parsers import parse_pl_sheet as _pps  # noqa: PLC0415
-            _cl = _pps(raw_cons_local, "Consolidated")
-            anomaly_flags = detect_anomalies(_cl, filtered_months)
-            for flag in anomaly_flags[:2]:  # cap at 2 anomaly chips
-                flag_color = "#CF222E" if flag.level == "critical" else "#BF8700"
-                icon = ":material/error:" if flag.level == "critical" else ":material/warning:"
-                insights.append((
-                    icon,
-                    flag_color,
-                    f"{flag.title}" + (f": {flag.detail[:80]}…" if len(flag.detail) > 80 else f": {flag.detail}"),
-                ))
-
-    if not insights:
-        return
-
+    currency = get_active_currency()
+    
+    context_str = f"Period: {period_label}"
+    if prior:
+        context_str += f" · vs {prior}"
+    context_str += f" · {currency}"
+    
     st.markdown(
-        f"<div style='font-size:11px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
-        f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:8px;margin-top:4px;'>"
-        f"Executive Insights</div>",
-        unsafe_allow_html=True,
+        f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};'>"
+        f"{escape(context_str)}</div>",
+        unsafe_allow_html=True
     )
 
-    n = len(insights)
-    cols = st.columns(n, gap="small")
-    for col, (icon, color, text) in zip(cols, insights):
-        with col:
-            st.markdown(
-                f"""<div style="background:#FFFFFF;border:1px solid {BLITZ_COLORS['border']};
-                    border-left:3px solid {color};border-radius:8px;padding:10px 12px;
-                    font-size:12.5px;line-height:1.5;color:{BLITZ_COLORS['text_primary']};
-                    min-height:54px;">{icon} {text}</div>""",
-                unsafe_allow_html=True,
+def _kpi_helper(kpis: dict, metric_key: str, label: str) -> None:
+    from streamlit_app.components.charts import render_sparkline
+    data = kpis.get(metric_key, {})
+    
+    spark_data = data.get("sparkline_data")
+    fig = None
+    if spark_data:
+        # Use red for expenses, blue for revenue
+        color = "#CF222E" if metric_key in ("Total COGS", "Total Operating Expenses") else BLITZ_COLORS["primary"]
+        fig = render_sparkline(spark_data, color=color)
+        
+    render_bi_kpi_card(
+        title=label,
+        current_value=fmt_display(data.get("cur")),
+        comparison_value=fmt_display(data.get("pri")) if data.get("pri") is not None else None,
+        variance_abs=fmt_variance(data.get("var_abs")),
+        variance_pct=fmt_percent(data.get("var_pct")),
+        direction=data.get("direction", "flat"),
+        semantic_status=data.get("status", "neutral"),
+        sparkline_fig=fig
+    )
+
+def _render_primary_kpis(kpis: dict, cons_long: pd.DataFrame, latest: str, prior: str | None) -> None:
+    with get_kpi_layout(4) as cols:
+        with cols[0]: _kpi_helper(kpis, "Total Gross Revenue", "Total Gross Revenue")
+        with cols[1]: _kpi_helper(kpis, "Total COGS", "Total COGS")
+        with cols[2]: _kpi_helper(kpis, "Gross Profit 1", "Gross Profit 1")
+        with cols[3]: _kpi_helper(kpis, "Gross Profit 2", "Gross Profit 2")
+        
+    st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
+    
+    with get_kpi_layout(4) as cols:
+        with cols[0]: _kpi_helper(kpis, "Total Operating Expenses", "Total Opex")
+        with cols[1]: _kpi_helper(kpis, "Net Revenue", "Net Revenue")
+        with cols[2]: _kpi_helper(kpis, "EBITDA", "EBITDA")
+        with cols[3]: _kpi_helper(kpis, "NET PROFIT/LOSS (Before Tax)", "Net Profit/Loss")
+
+
+def _render_margin_growth_kpis(kpis: dict, cons_long: pd.DataFrame, latest: str) -> None:
+    st.markdown("<div style='margin-bottom: 24px;'></div>", unsafe_allow_html=True)
+    
+    with get_kpi_layout(5) as cols:
+        margins = [("EBITDA Margin %", "EBITDA Margin"), ("Gross Margin %", "Gross Margin"), ("Operating Margin %", "Operating Margin")]
+        for i, (m_key, m_label) in enumerate(margins):
+            data = kpis.get(m_key, {})
+            with cols[i]:
+                render_bi_kpi_card(
+                    title=m_label,
+                    current_value=fmt_percent(data.get("cur")),
+                    variance_abs=f"{data.get('var_abs') * 100:+.1f}pp" if data.get("var_abs") is not None else None,
+                    direction=data.get("direction", "flat"),
+                    semantic_status=data.get("status", "neutral"),
+                    comparison_value=fmt_percent(data.get("pri")) if data.get("pri") is not None else None,
+                    size="medium"
+                )
+                
+        # Growth
+        growth = kpis.get("growth", {})
+        with cols[3]:
+            render_bi_kpi_card(
+                title="YoY Growth %",
+                current_value=fmt_percent(growth.get("yoy")),
+                semantic_status=growth.get("yoy_status", "neutral"),
+                direction="up" if growth.get("yoy") and growth.get("yoy") > 0 else "down",
+                subtitle=f"vs {growth.get('month_ly')}" if growth.get("month_ly") else None,
+                size="medium"
+            )
+        with cols[4]:
+            render_bi_kpi_card(
+                title="MoM Growth %",
+                current_value=fmt_percent(growth.get("mom")),
+                semantic_status=growth.get("mom_status", "neutral"),
+                direction="up" if growth.get("mom") and growth.get("mom") > 0 else "down",
+                subtitle=f"vs {growth.get('month_lm')}" if growth.get("month_lm") else None,
+                size="medium"
             )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Row 3a: Entity performance comparison table
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _render_entity_performance(
-    entity_frames: dict[str, pd.DataFrame],
-    sheets: dict[str, pd.DataFrame],
-    latest: str,
-    prior: str | None,
-) -> None:
-    st.markdown(
-        f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
-        f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:10px;'>"
-        f":material/compare: Entity Performance — {latest}</div>",
-        unsafe_allow_html=True,
-    )
-
-    _METRICS = [
-        ("Revenue", "Total Gross Revenue"),
-        ("Gross Profit", "Gross Profit 2"),
-        ("EBITDA", "EBITDA"),
-        ("Net P/L", "NET PROFIT/LOSS (Before Tax)"),
-    ]
-
-    rows: list[dict] = []
-    for entity, df in entity_frames.items():
-        if df.empty:
-            continue
-        row: dict = {"Entity": entity}
-        for col_label, metric in _METRICS:
-            cur = _get(df, metric, latest)
-            pri = _get(df, metric, prior) if prior else None
-            val_str = fmt_display(cur) if cur is not None else "—"
-            if pri is not None and cur is not None and pri != 0:
-                pct = (cur - pri) / abs(pri) * 100
-                arrow = "▲" if pct > 0 else "▼"
-                row[col_label] = f"{val_str} {arrow}{abs(pct):.0f}%"
-            else:
-                row[col_label] = val_str
-        rows.append(row)
-
-    if not rows:
-        st.caption("No per-entity data available.")
-        return
-
-    border = BLITZ_COLORS["border"]
-    header_bg = BLITZ_COLORS["pale_blue"]
-    header_cols = ["Entity"] + [c for c, _ in _METRICS]
-    col_widths = ["22%", "20%", "20%", "20%", "18%"]
-
-    thead = "".join(
-        f"<th style='padding:7px 8px;text-align:left;font-size:11px;font-weight:600;"
-        f"color:{BLITZ_COLORS['text_secondary']};width:{col_widths[i]};'>{h}</th>"
-        for i, h in enumerate(header_cols)
-    )
-    tbody = ""
-    for i, row in enumerate(rows):
-        bg = "#FFFFFF" if i % 2 == 0 else BLITZ_COLORS["off_white"]
-        entity = row["Entity"]
-        dot = (
-            f"<span style='display:inline-block;width:8px;height:8px;border-radius:50%;"
-            f"background:{ENTITY_COLORS.get(entity, BLITZ_COLORS['primary'])};margin-right:6px;'></span>"
-        )
-        entity_cell = (
-            f"<td style='padding:8px;font-size:12px;font-weight:600;"
-            f"color:{BLITZ_COLORS['text_primary']};'>{dot}{entity}</td>"
-        )
-        data_cells = "".join(
-            f"<td style='padding:8px;font-size:11.5px;color:{BLITZ_COLORS['text_primary']};'>{row.get(c, '—')}</td>"
-            for c, _ in _METRICS
-        )
-        tbody += f"<tr style='background:{bg};'>{entity_cell}{data_cells}</tr>"
-
-    st.markdown(
-        f"<table style='width:100%;border-collapse:collapse;border:1px solid {border};"
-        f"border-radius:8px;overflow:hidden;'>"
-        f"<thead style='background:{header_bg};'><tr>{thead}</tr></thead>"
-        f"<tbody>{tbody}</tbody></table>",
-        unsafe_allow_html=True,
-    )
-
-    # EBITDA margin per entity (inline below table)
-    margin_parts = []
-    for entity, _df in entity_frames.items():
-        raw_entity = sheets.get(ENTITY_SUMMARY_SHEETS.get(entity, ""))
-        if raw_entity is None:
-            continue
-        try:
-            ratios = parse_ratios(raw_entity, entity)
-            if not ratios.empty:
-                m_rows = ratios[ratios["Metric"].str.lower().str.contains("ebitda margin")]
-                cur_r = m_rows[m_rows["Month"] == latest] if not m_rows.empty else pd.DataFrame()
-                if not cur_r.empty:
-                    mv = float(cur_r["Value"].sum()) * 100
-                    color = ENTITY_COLORS.get(entity, BLITZ_COLORS["primary"])
-                    margin_parts.append(
-                        f"<strong style='color:{color};'>{entity}</strong> {mv:.1f}%"
-                    )
-        except Exception:
-            pass
-    if margin_parts:
-        st.markdown(
-            f"<div style='margin-top:6px;font-size:11px;color:{BLITZ_COLORS['text_secondary']};'>"
-            f"EBITDA Margin %: {' &nbsp;·&nbsp; '.join(margin_parts)}</div>",
-            unsafe_allow_html=True,
-        )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Row 3b: Revenue stream ranking
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _render_stream_ranking(
-    sheets: dict[str, pd.DataFrame],
-    latest: str,
-    prior: str | None,
-) -> None:
-    st.markdown(
-        f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
-        f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:10px;'>"
-        f":material/donut_small: Revenue Streams — {latest}</div>",
-        unsafe_allow_html=True,
-    )
-    raw_master = sheets.get("MASTER")
-    if raw_master is None:
-        st.caption("MASTER sheet not found.")
-        return
-    master, missing = parse_master(raw_master)
-    if missing or master.empty:
-        st.caption("Could not parse MASTER sheet.")
-        return
-
-    latest_data = master[master["Month"] == latest]
-    prior_data = master[master["Month"] == prior] if prior else pd.DataFrame()
-    stream_cur = latest_data.groupby("Rev Stream")["Amount (IDR)"].sum().sort_values(ascending=False)
-    stream_pri = prior_data.groupby("Rev Stream")["Amount (IDR)"].sum() if not prior_data.empty else pd.Series(dtype=float)
-
-    total = stream_cur.sum()
-    if total == 0:
-        st.caption("No stream revenue data for selected month.")
-        return
-
-    border = BLITZ_COLORS["border"]
-    items_html = ""
-    for rank, (stream, rev) in enumerate(stream_cur.items(), 1):
-        pct = rev / total * 100
-        prior_rev = float(stream_pri.get(stream, 0))
-        mom_pct = ((rev - prior_rev) / abs(prior_rev) * 100) if prior_rev != 0 else None
-        mom_str = f"{mom_pct:+.1f}%" if mom_pct is not None else "—"
-        mom_color = BLITZ_COLORS["primary"] if mom_pct is not None and mom_pct >= 0 else "#CF222E"
-        bar_w = max(3, int(pct))
-        items_html += (
-            f"<div style='padding:8px 4px;border-bottom:1px solid {border};'>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;'>"
-            f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_primary']};'>"
-            f"<span style='color:{BLITZ_COLORS['text_secondary']};margin-right:6px;'>{rank}.</span>{stream}</div>"
-            f"<div style='text-align:right;'>"
-            f"<span style='font-size:12px;font-weight:700;color:{BLITZ_COLORS['text_primary']};'>{fmt_display(rev)}</span>"
-            f"<span style='font-size:10px;color:{mom_color};margin-left:6px;'>{mom_str}</span>"
-            f"</div></div>"
-            f"<div style='height:4px;background:{BLITZ_COLORS['border']};border-radius:2px;'>"
-            f"<div style='height:4px;width:{bar_w}%;background:{BLITZ_COLORS['primary']};border-radius:2px;'></div></div>"
-            f"<div style='font-size:10px;color:{BLITZ_COLORS['text_secondary']};margin-top:2px;'>{pct:.1f}% of total</div>"
-            f"</div>"
-        )
-
-    st.markdown(
-        f"<div style='background:#FFFFFF;border:1px solid {border};border-radius:8px;"
-        f"padding:4px 12px;'>{items_html}</div>",
-        unsafe_allow_html=True,
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Row 3c: Client concentration risk
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _render_concentration(
-    sheets: dict[str, pd.DataFrame],
-    filtered_months: list[str],
-) -> None:
-    st.markdown(
-        f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
-        f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:10px;'>"
-        f":material/groups: Concentration Risk</div>",
-        unsafe_allow_html=True,
-    )
-    raw_master = sheets.get("MASTER")
-    if raw_master is None:
-        st.caption("MASTER sheet not found.")
-        return
-    master, missing = parse_master(raw_master)
-    if missing or master.empty:
-        st.caption("Could not parse MASTER sheet.")
-        return
-
-    vis = master[master["Month"].isin(filtered_months)]
-    if vis.empty:
-        st.caption("No data in the selected range.")
-        return
-
-    total = vis["Amount (IDR)"].sum()
-    if total == 0:
-        st.caption("No revenue in selected period.")
-        return
-
-    by_client = vis.groupby("Client (clean)")["Amount (IDR)"].sum().sort_values(ascending=False)
-    top5_pct = by_client.head(5).sum() / total * 100
-
-    risk_color = "#CF222E" if top5_pct > 60 else "#BF8700" if top5_pct > 40 else BLITZ_COLORS["primary"]
-    risk_label = "HIGH" if top5_pct > 60 else "MODERATE" if top5_pct > 40 else "LOW"
-    border = BLITZ_COLORS["border"]
-
-    st.markdown(
-        f"<div style='background:#FFFFFF;border:1px solid {border};border-radius:8px;"
-        f"padding:14px 16px;margin-bottom:10px;'>"
-        f"<div style='font-size:28px;font-weight:800;color:{risk_color};'>{top5_pct:.1f}%</div>"
-        f"<div style='font-size:11px;color:{BLITZ_COLORS['text_secondary']};margin-top:2px;'>"
-        f"Top-5 client share &nbsp;"
-        f"<span style='background:{risk_color};color:#FFFFFF;padding:1px 6px;border-radius:4px;"
-        f"font-size:10px;font-weight:700;'>{risk_label}</span></div>"
-        f"<div style='height:6px;background:{BLITZ_COLORS['border']};border-radius:3px;margin-top:10px;'>"
-        f"<div style='height:6px;width:{min(100, top5_pct):.0f}%;background:{risk_color};border-radius:3px;'>"
-        f"</div></div></div>",
-        unsafe_allow_html=True,
-    )
-
-    items_html = ""
-    for rank, (name, rev) in enumerate(by_client.head(5).items(), 1):
-        pct = rev / total * 100
-        items_html += (
-            f"<div style='display:flex;justify-content:space-between;padding:6px 0;"
-            f"border-bottom:1px solid {border};font-size:11.5px;'>"
-            f"<div style='color:{BLITZ_COLORS['text_secondary']};margin-right:4px;width:16px;'>{rank}.</div>"
-            f"<div style='flex:1;color:{BLITZ_COLORS['text_primary']};font-weight:500;"
-            f"white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:120px;'>{name}</div>"
-            f"<div style='text-align:right;'>"
-            f"<span style='color:{BLITZ_COLORS['text_primary']};font-weight:600;'>{fmt_display(rev)}</span>"
-            f"<span style='color:{BLITZ_COLORS['text_secondary']};margin-left:4px;font-size:10px;'>{pct:.1f}%</span>"
-            f"</div></div>"
-        )
-    st.markdown(
-        f"<div style='background:#FFFFFF;border:1px solid {border};border-radius:8px;"
-        f"padding:8px 12px;'>{items_html}</div>",
-        unsafe_allow_html=True,
-    )
-
-    records = []
-    for month in filtered_months:
-        m_data = master[master["Month"] == month]
-        m_total = m_data["Amount (IDR)"].sum()
-        if m_total <= 0:
-            continue
-        top5_m = m_data.groupby("Client (clean)")["Amount (IDR)"].sum().nlargest(5).sum()
-        records.append({"Month": month, "Top-5 %": round(top5_m / m_total * 100, 1)})
-    if len(records) > 1:
-        st.caption("Monthly trend:")
-        st.line_chart(pd.DataFrame(records).set_index("Month")["Top-5 %"], height=110)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Row 4a: Revenue trend by entity (stacked area)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _render_entity_revenue_trend(
-    entity_frames: dict[str, pd.DataFrame],
-    filtered_months: list[str],
-) -> None:
-    st.markdown(
-        f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
-        f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;'>"
-        f":material/show_chart: Revenue by Entity</div>",
-        unsafe_allow_html=True,
-    )
-    frames: list[pd.DataFrame] = []
-    for entity, df in entity_frames.items():
-        rev = df[df["Metric"] == "Total Gross Revenue"]
-        if not rev.empty:
-            frames.append(pd.DataFrame(rev))
-
-    if not frames:
-        st.caption("No per-entity data found.")
-        return
-
-    entity_long = pd.concat(frames, ignore_index=True)
-    vis = pd.DataFrame(entity_long[entity_long["Month"].isin(filtered_months)])
-    if vis.empty:
-        st.caption("No data in the selected range.")
-        return
-
-    # Optional 3M rolling average (only when enough months available)
-    show_rolling = (
-        len(filtered_months) >= 4
-        and st.checkbox("Show 3M rolling avg", value=False, key="overview_rolling_avg")
-    )
-    rolling_df = None
-    if show_rolling:
-        # Build rolling avg per entity
-        rolling_frames = []
-        for entity, df in entity_frames.items():
-            r = compute_rolling_avg(df, "Total Gross Revenue", filtered_months, window=3)
-            if not r.empty:
-                r = r.copy()
-                r["Entity"] = entity
-                rolling_frames.append(r)
-        if rolling_frames:
-            rolling_df = pd.concat(rolling_frames, ignore_index=True)
-
-    # Annotations on the group leader entity (peak/trough)
-    top_entity: str | None = None
-    top_rev = 0.0
-    for entity, df in entity_frames.items():
-        rows = df[(df["Metric"] == "Total Gross Revenue") & (df["Month"].isin(filtered_months))]
-        rev = float(rows["Value"].sum()) if not rows.empty else 0.0
-        if rev > top_rev:
-            top_rev = rev
-            top_entity = entity
-
-    annotations = None
-    if top_entity and top_entity in entity_frames:
-        annotations = find_chart_annotations(
-            entity_frames[top_entity], "Total Gross Revenue", filtered_months, max_annotations=2
-        )
-
-    if show_rolling and rolling_df is not None:
-        fig = annotated_trend_chart(
-            vis, "Month", "Value", "Entity",
-            rolling_avg_df=rolling_df,
-            rolling_avg_label="3M Avg",
-            annotations=annotations,
-            category_orders={"Month": filtered_months},
-            color_map=ENTITY_COLORS,
-        )
-    else:
-        fig = entity_revenue_line_chart(
-            vis, "Month", "Value", "Entity",
-            category_orders={"Month": filtered_months},
-            color_map=ENTITY_COLORS,
-        )
-        # Add annotations to the plain chart too
-        if annotations:
-            from streamlit_app.components.charts import add_reference_line  # noqa: PLC0415
-            from streamlit_app.constants import fmt_idr as _fmt  # noqa: PLC0415
-            _ACOLORS = {"peak": BLITZ_COLORS["primary"], "trough": "#CF222E",
-                        "mom_up": BLITZ_COLORS["primary_hover"], "mom_down": "#BF8700"}
-            for ann in annotations:
-                fig.add_annotation(
-                    x=ann.month, y=ann.value,
-                    text=f"<b>{'▲' if ann.kind in ('peak','mom_up') else '▼'} {ann.label}</b><br>{_fmt(ann.value)}",
-                    showarrow=True, arrowhead=2, arrowsize=0.8, arrowwidth=1.2,
-                    arrowcolor=_ACOLORS.get(ann.kind, BLITZ_COLORS["text_secondary"]),
-                    ax=0, ay=-36,
-                    font=dict(size=9, color=_ACOLORS.get(ann.kind, BLITZ_COLORS["text_secondary"]),
-                              family="Inter, sans-serif"),
-                    bgcolor="rgba(255,255,255,0.88)",
-                    bordercolor=_ACOLORS.get(ann.kind, BLITZ_COLORS["text_secondary"]),
-                    borderwidth=1, borderpad=3,
+def _render_entity_business_kpis(kpis: dict, entity_frames: dict[str, pd.DataFrame], latest: str) -> None:
+    st.markdown("<div style='margin-bottom: 24px;'></div>", unsafe_allow_html=True)
+    
+    with get_kpi_layout(5) as cols:
+        # Entities
+        for i, entity in enumerate(["Blitz", "Borzo", "TheLorry"]):
+            df = entity_frames.get(entity)
+            rev = _get(df, "Total Gross Revenue", latest) if df is not None else None
+            with cols[i]:
+                render_bi_kpi_card(
+                    title=f"{entity} Revenue",
+                    current_value=fmt_display(rev),
+                    semantic_status="neutral",
+                    size="medium"
                 )
+                
+        # Business
+        bus = kpis.get("business", {})
+        
+        # Determine reliable Active Client display
+        act_clients = bus.get("active_clients", 0)
+        client_val = str(act_clients) if act_clients > 0 else "N/A"
+        client_sub = "Clients with revenue in period" if act_clients > 0 else "Active Clients cannot currently be computed reliably from the parsed data."
+        
+        with cols[3]:
+            render_bi_kpi_card(
+                title="Active Clients",
+                current_value=client_val,
+                subtitle=client_sub,
+                size="medium"
+            )
+        with cols[4]:
+            render_bi_kpi_card(
+                title="Top Revenue Stream",
+                current_value=bus.get("top_stream", "N/A"),
+                subtitle=f"{fmt_percent(bus.get('top_stream_pct', 0))} of Total Revenue" if bus.get("top_stream") != "N/A" else "Data unavailable for period",
+                size="medium"
+            )
 
-    render_plotly_chart(fig)
 
+def _render_gross_revenue_trend(cons_long: pd.DataFrame, all_months: list[str], filtered_months: list[str]) -> None:
+    from streamlit_app.components.charts import trend_line_chart
+    
+    df = cons_long[cons_long["Metric"] == "Total Gross Revenue"].copy()
+    df = df.dropna(subset=["Value"])
+    df = df.sort_values(by="MonthDate")
+    
+    # Calculate MoM and YoY safely across all available history
+    df["MoM %"] = df["Value"].pct_change(1)
+    df["YoY %"] = df["Value"].pct_change(12)
+    
+    df["MoM %"] = df["MoM %"].apply(lambda x: f"{x:+.1%}" if pd.notna(x) else "N/A")
+    df["YoY %"] = df["YoY %"].apply(lambda x: f"{x:+.1%}" if pd.notna(x) else "N/A")
+    
+    # Filter to only the selected reporting period context
+    df = df[df["Month"].isin(filtered_months)]
+    
+    with render_chart_card("Revenue Trend", subtitle="Monthly Total Gross Revenue"):
+        if df.empty:
+            st.caption("No data available for the selected period.")
+        else:
+            fig = trend_line_chart(
+                df, x="Month", y="Value", color=None,
+                category_orders={"Month": filtered_months},
+                hover_data=["MoM %", "YoY %"]
+            )
+            fig.update_layout(height=360)
+            apply_blitz_chart_theme(fig)
+            render_plotly_chart(fig)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Row 4b: P&L waterfall for latest month
-# ─────────────────────────────────────────────────────────────────────────────
+def _render_profitability_trend(cons_long: pd.DataFrame, filtered_months: list[str]) -> None:
+    from streamlit_app.components.charts import trend_line_chart
+    
+    metrics = ["Gross Profit 1", "EBITDA", "NET PROFIT/LOSS (Before Tax)"]
+    df = cons_long[cons_long["Metric"].isin(metrics)].copy()
+    df = df.dropna(subset=["Value"])
+    df = df[df["Month"].isin(filtered_months)]
+    
+    rename_map = {
+        "NET PROFIT/LOSS (Before Tax)": "Net Profit/Loss"
+    }
+    df["Metric"] = df["Metric"].replace(rename_map)
+    
+    color_map = {
+        "Gross Profit 1": BLITZ_COLORS["primary"],
+        "EBITDA": BLITZ_COLORS["primary_hover"],
+        "Net Profit/Loss": BLITZ_COLORS["deep_blue"]
+    }
+    
+    with render_chart_card("Profitability Trend", subtitle="Gross Profit 1 vs EBITDA vs Net Profit"):
+        if df.empty:
+            st.caption("No data available for the selected period.")
+        else:
+            fig = trend_line_chart(
+                df, x="Month", y="Value", color="Metric",
+                category_orders={"Month": filtered_months},
+                color_map=color_map
+            )
+            fig.update_layout(height=360)
+            apply_blitz_chart_theme(fig)
+            render_plotly_chart(fig)
 
-def _render_waterfall(cons_long: pd.DataFrame, latest: str) -> None:
-    st.markdown(
-        f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
-        f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;'>"
-        f":material/waterfall_chart: P&L Bridge — {latest}</div>",
-        unsafe_allow_html=True,
+def _render_entity_donut(entity_frames: dict[str, pd.DataFrame], filtered_months: list[str]) -> None:
+    from streamlit_app.components.charts import donut_chart
+    
+    data = []
+    for ent, df in entity_frames.items():
+        if df is not None:
+            mask = (df["Metric"] == "Total Gross Revenue") & (df["Month"].isin(filtered_months))
+            val = df.loc[mask, "Value"].sum()
+            if pd.notna(val) and val != 0:
+                data.append({"Entity": ent, "Value": val})
+                
+    df_donut = pd.DataFrame(data)
+    
+    with render_chart_card("Revenue by Entity", subtitle="Revenue Share by Entity"):
+        if df_donut.empty:
+            st.caption("No data available for the selected period.")
+        else:
+            custom_entity_colors = {
+                "Blitz": BLITZ_COLORS.get("primary", "#00B9F2"),
+                "Borzo": "#F47920",     # established orange
+                "TheLorry": "#009944"   # established green
+            }
+            fig = donut_chart(df_donut, names="Entity", values="Value", color_map=custom_entity_colors)
+            fig.update_layout(height=360)
+            apply_blitz_chart_theme(fig)
+            render_plotly_chart(fig)
+
+def _render_stream_donut(master: pd.DataFrame, filtered_months: list[str]) -> None:
+    from streamlit_app.components.charts import donut_chart
+    
+    if master.empty:
+        df = pd.DataFrame()
+    else:
+        from streamlit_app.data.parsers import month_sort_key
+        entity_f = st.session_state.get("entity_filter", [])
+        stream_f = st.session_state.get("stream_filter", [])
+        industry_f = st.session_state.get("industry_filter", [])
+
+        # Match using MonthDate (Timestamp) because MASTER's Month column might be raw datetime objects
+        filtered_dts = [month_sort_key(m) for m in filtered_months]
+        mask = master["MonthDate"].isin(filtered_dts)
+        
+        if entity_f:
+            mask &= master["Entity"].isin(entity_f)
+        if stream_f:
+            mask &= master["Rev Stream"].isin(stream_f)
+        if industry_f:
+            mask &= master["Industry"].isin(industry_f)
+            
+        df = master[mask]
+        
+    if df.empty:
+        agg = pd.DataFrame()
+    else:
+        agg = df.groupby("Rev Stream", as_index=False)["Amount (IDR)"].sum()
+        agg = agg.rename(columns={"Rev Stream": "Metric", "Amount (IDR)": "Value"})
+        agg = agg[(agg["Value"].notna()) & (agg["Value"] > 0)]
+        
+        # Apply currency conversion if needed
+        currency = st.session_state.get("currency", "IDR")
+        if currency == "USD":
+            fx = st.session_state.get("fx_rate", 15000.0)
+            agg["Value"] = agg["Value"] / fx
+    
+    with render_chart_card("Revenue by Revenue Stream", subtitle="Revenue Share by Stream"):
+        if agg.empty:
+            st.caption("No data available for the selected period.")
+        else:
+            # We map streams to distinct colors using Blitz color tokens if possible
+            fig = donut_chart(agg, names="Metric", values="Value")
+            fig.update_layout(height=360)
+            apply_blitz_chart_theme(fig)
+            render_plotly_chart(fig)
+
+def _render_waterfall() -> None:
+    from streamlit_app.components.filters import render_empty_state
+    render_empty_state(
+        title="P&L BRIDGE UNAVAILABLE",
+        suggestion="P&L bridge unavailable for the current parsed data.",
+        show_reset=False
     )
-    labels, values, measure = [], [], []
-    for metric_key, display_name in WATERFALL_STEPS:
-        val = _get(cons_long, metric_key, latest)
-        if val is None:
-            continue
-        labels.append(display_name)
-        values.append(val)
-        measure.append(
-            "total" if display_name in ("Gross Revenue", "Gross Profit", "EBITDA", "Net Profit")
-            else "relative"
-        )
-    if not labels:
-        st.caption("No waterfall data available.")
-        return
-    fig = waterfall_chart(labels, values, title="", measures=measure)
-    render_plotly_chart(fig)
-
-
-def _render_drill_strip(sheets: dict[str, pd.DataFrame], latest: str) -> None:
-    """Render a row of action chips to drill down to specific entities."""
-    st.markdown(
-        f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
-        f"letter-spacing:0.06em;text-transform:uppercase;margin:24px 0 8px;'>"
-        f":material/manage_search: Investigate by Entity</div>",
-        unsafe_allow_html=True,
-    )
-
-    cols = st.columns(4, gap="small")
-    for i, entity in enumerate(ENTITY_SUMMARY_SHEETS.keys()):
-        if i >= 4:
-            break
-        with cols[i]:
-            if st.button(
-                f"Drill to {entity} →",
-                key=f"drill_{entity}",
-                width="stretch",
-                help=f"Filter entire dashboard to {entity} and investigate."
-            ):
-                drill_to_entity(entity)

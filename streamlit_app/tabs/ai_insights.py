@@ -105,10 +105,15 @@ def render(sheets: dict[str, pd.DataFrame]) -> None:
     render_active_filter_bar(filtered_months)
 
     # ── Build data context (cached in session state) ─────────────────────
-    ctx_cache_key = f"ai_data_ctx_{hash(tuple(filtered_months))}"
+    wb_hash = st.session_state.get("_wb_hash", "unknown")
+    cmp_label = st.session_state.get("_resolved_compare_label") or "None"
+    ctx_cache_key = f"ai_data_ctx_{wb_hash}_{hash(tuple(filtered_months))}_{hash(cmp_label)}"
+    
     if ctx_cache_key not in st.session_state:
         with st.spinner("Preparing data context…"):
-            st.session_state[ctx_cache_key] = prepare_data_context(sheets, filtered_months)
+            st.session_state[ctx_cache_key] = prepare_data_context(
+                sheets, filtered_months, cmp_label, wb_hash
+            )
     data_context: str = st.session_state[ctx_cache_key]
 
     # ── Executive summary & Anomaly detection (side by side) ─────────────
@@ -134,6 +139,8 @@ def _render_executive_summary(data_context: str, latest_month: str) -> None:
     render_section_header("Executive summary", "summarize")
     st.caption(f"AI-generated overview for **{latest_month}**")
 
+    summary_key = f"ai_exec_summary_{hash(data_context)}"
+    
     if st.button(
         ":material/auto_awesome: Generate summary",
         key="gen_summary_btn",
@@ -142,12 +149,12 @@ def _render_executive_summary(data_context: str, latest_month: str) -> None:
         with st.spinner("Generating executive summary…"):
             try:
                 summary = generate_executive_summary(data_context, latest_month)
-                st.session_state["ai_exec_summary"] = summary
-            except Exception as exc:  # noqa: BLE001
-                st.error(f"Error generating summary: {exc}")
+                st.session_state[summary_key] = summary
+            except Exception:  # noqa: BLE001
+                st.error("AI insights temporarily unavailable.")
                 return
 
-    summary = st.session_state.get("ai_exec_summary")
+    summary = st.session_state.get(summary_key)
     if summary:
         st.markdown(summary)
     else:
@@ -159,6 +166,8 @@ def _render_anomaly_detection(data_context: str) -> None:
     render_section_header("Anomaly detection", "report")
     st.caption("AI-flagged unusual patterns in your data")
 
+    anomaly_key = f"ai_anomalies_{hash(data_context)}"
+    
     if st.button(
         ":material/search: Scan for anomalies",
         key="scan_anomaly_btn",
@@ -167,12 +176,12 @@ def _render_anomaly_detection(data_context: str) -> None:
         with st.spinner("Scanning for anomalies…"):
             try:
                 anomalies = detect_anomalies(data_context)
-                st.session_state["ai_anomalies"] = anomalies
-            except Exception as exc:  # noqa: BLE001
-                st.error(f"Error scanning for anomalies: {exc}")
+                st.session_state[anomaly_key] = anomalies
+            except Exception:  # noqa: BLE001
+                st.error("AI insights temporarily unavailable.")
                 return
 
-    anomalies = st.session_state.get("ai_anomalies")
+    anomalies = st.session_state.get(anomaly_key)
     if anomalies:
         st.markdown(anomalies)
     else:
@@ -214,8 +223,8 @@ def _render_chat(data_context: str) -> None:
                     response = st.write_stream(
                         chat_with_data_stream(data_context, prompt, chat_history)
                     )
-                except Exception as exc:  # noqa: BLE001
-                    response = f"Sorry, I encountered an error: {exc}"
+                except Exception:  # noqa: BLE001
+                    response = "AI insights temporarily unavailable."
                     st.error(response)
             chat_history.append({"role": "assistant", "content": response})
             # Clear the pills widget key so it resets if chat is cleared later
@@ -243,8 +252,8 @@ def _render_chat(data_context: str) -> None:
                 response = st.write_stream(
                     chat_with_data_stream(data_context, prompt, chat_history)
                 )
-            except Exception as exc:  # noqa: BLE001
-                response = f"Sorry, I encountered an error: {exc}"
+            except Exception:  # noqa: BLE001
+                response = "AI insights temporarily unavailable."
                 st.error(response)
 
         chat_history.append({"role": "assistant", "content": response})

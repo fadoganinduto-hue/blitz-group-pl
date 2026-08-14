@@ -19,15 +19,14 @@ from streamlit_app.constants import (
     PLOTLY_COLOR_SEQUENCE,
     fmt_idr,
 )
+from streamlit_app.components.filters import fmt_display
 
 # ---------------------------------------------------------------------------
 # Module-level shared helpers
 # ---------------------------------------------------------------------------
 
-_IDR_HOVER = "<b>%{fullData.name}</b><br>Period: %{x}<br>Value: Rp%{y:,.0f}<extra></extra>"
-_IDR_HOVER_X = "<b>%{x}</b><br>%{fullData.name}: Rp%{y:,.0f}<extra></extra>"
 _PCT_HOVER = "<b>%{fullData.name}</b><br>Period: %{x}<br>%{y:.2%}<extra></extra>"
-_PLOTLY_CONFIG = {"displayModeBar": False, "scrollZoom": False, "responsive": True}
+_PLOTLY_CONFIG = {"displayModeBar": True, "scrollZoom": False, "responsive": True}
 
 
 def render_plotly_chart(fig: go.Figure, *, key: str | None = None) -> None:
@@ -63,9 +62,36 @@ def _resolved_color_map(
     return mapping
 
 
+def _get_prefix() -> str:
+    from streamlit_app.components.filters import get_active_currency
+    return "$" if get_active_currency() == "USD" else "Rp"
+
+
+def _fmt_converted(value: float) -> str:
+    """Format a value that is ALREADY in the active currency (no FX conversion).
+
+    Use this inside chart builders that receive pre-converted data from callers.
+    Never call convert_value() here — the caller has already done it.
+    """
+    from streamlit_app.constants import IDR_SUFFIX_THRESHOLDS
+    from streamlit_app.components.filters import get_active_currency
+    currency = get_active_currency()
+    prefix = "$" if currency == "USD" else "Rp"
+    thresholds = IDR_SUFFIX_THRESHOLDS if currency == "IDR" else [
+        (1_000_000_000, "B", 1_000_000_000),
+        (1_000_000, "M", 1_000_000),
+        (1_000, "K", 1_000),
+    ]
+    abs_val = abs(value)
+    sign = "-" if value < 0 else ""
+    for threshold, suffix, divisor in thresholds:
+        if abs_val >= threshold:
+            return f"{sign}{prefix}{abs_val / divisor:,.1f}{suffix}"
+    return f"{sign}{prefix}{abs_val:,.0f}"
+
 def _apply_financial_axis(fig: go.Figure) -> None:
     """Use compact IDR ticks while retaining exact values in hover details."""
-    fig.update_yaxes(tickprefix="Rp", tickformat="~s")
+    fig.update_yaxes(tickprefix=_get_prefix(), tickformat="~s")
 
 
 def _apply_base_layout(fig: go.Figure, title: str = "") -> go.Figure:
@@ -80,7 +106,7 @@ def _apply_base_layout(fig: go.Figure, title: str = "") -> go.Figure:
     base_legend = dict(
         orientation="h",
         yanchor="bottom",
-        y=1.06,          # ↑ from 1.04; clears chart title on titled charts
+        y=1.03,          # Reduced spacing to keep chart compact but clear title
         xanchor="right",
         x=1,
         font=dict(size=11, color=BLITZ_COLORS["text_secondary"]),
@@ -91,6 +117,7 @@ def _apply_base_layout(fig: go.Figure, title: str = "") -> go.Figure:
         gridcolor="rgba(226, 226, 226, 0.8)",
         gridwidth=1,
         zeroline=False,
+        automargin=True,
         tickfont=dict(size=11, color=BLITZ_COLORS["text_secondary"]),
         title_font=dict(size=12, color=BLITZ_COLORS["text_secondary"]),
         showgrid=False,
@@ -106,7 +133,7 @@ def _apply_base_layout(fig: go.Figure, title: str = "") -> go.Figure:
             pad=dict(l=4),
         ),
         legend=base_legend,
-        margin=dict(l=52, r=20, t=52 if title else 36, b=60),
+        margin=dict(l=10, r=10, t=40 if title else 20, b=20),
         hovermode="x unified",
         hoverlabel=dict(
             bgcolor=BLITZ_COLORS["white"],
@@ -117,7 +144,7 @@ def _apply_base_layout(fig: go.Figure, title: str = "") -> go.Figure:
         yaxis=base_axes,
     )
     fig.update_xaxes(showgrid=False)
-    fig.update_yaxes(showgrid=True)
+    fig.update_yaxes(showgrid=True, automargin=True)
     return fig
 
 
@@ -153,6 +180,7 @@ def _apply_xaxis_months(
         step = 3
 
     xaxis_updates: dict = dict(
+        type="category",
         tickangle=tick_angle,
         automargin=True,
         tickfont=dict(size=10, color=BLITZ_COLORS["text_secondary"]),
@@ -181,6 +209,7 @@ def trend_line_chart(
     category_orders: dict | None = None,
     color_map: dict | None = None,
     y_format: str = "idr",
+    hover_data: list[str] | None = None,
 ) -> go.Figure:
     """Return a multi-series line chart with markers and rich hover tooltips."""
     fig = px.line(
@@ -189,6 +218,7 @@ def trend_line_chart(
         y=y,
         color=color,
         markers=True,
+        hover_data=hover_data,
         category_orders=category_orders or {},
         color_discrete_map=_resolved_color_map(df, color, color_map),
         color_discrete_sequence=PLOTLY_COLOR_SEQUENCE,
@@ -200,11 +230,19 @@ def trend_line_chart(
             "<b>%{x}</b><br>%{y:.1%}<extra></extra>"
         )
     else:
-        hover = (
-            "<b>%{fullData.name}</b><br>Period: %{x}<br>Value: Rp%{y:,.0f}<extra></extra>"
-            if color else
-            "<b>%{x}</b><br>Value: Rp%{y:,.0f}<extra></extra>"
-        )
+        # If custom hover data is provided, use custom template
+        if hover_data and not color:
+            custom_parts = [f"<b>%{{x}}</b><br>Total Gross Revenue: {_get_prefix()}%{{y:,.0f}}"]
+            for i, col in enumerate(hover_data):
+                custom_parts.append(f"{col}: %{{customdata[{i}]}}")
+            custom_parts.append("<extra></extra>")
+            hover = "<br>".join(custom_parts)
+        else:
+            hover = (
+                f"<b>%{{fullData.name}}</b><br>Period: %{{x}}<br>Value: {_get_prefix()}%{{y:,.0f}}<extra></extra>"
+                if color else
+                f"<b>%{{x}}</b><br>Value: {_get_prefix()}%{{y:,.0f}}<extra></extra>"
+            )
     fig.update_traces(
         hovertemplate=hover,
         line=dict(width=2.5),
@@ -221,6 +259,53 @@ def trend_line_chart(
     month_labels = (category_orders or {}).get(x)
     n_months = len(month_labels) if month_labels else df[x].nunique()
     _apply_xaxis_months(fig, n_months, month_labels)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Donut chart
+# ---------------------------------------------------------------------------
+
+def donut_chart(
+    df: pd.DataFrame,
+    names: str,
+    values: str,
+    title: str = "",
+    color_map: dict | None = None,
+) -> go.Figure:
+    """Return a donut chart for revenue composition."""
+    fig = px.pie(
+        df,
+        names=names,
+        values=values,
+        hole=0.65,
+        color=names,
+        color_discrete_map=_resolved_color_map(df, names, color_map),
+        color_discrete_sequence=PLOTLY_COLOR_SEQUENCE,
+    )
+    
+    hover = f"<b>%{{label}}</b><br>Revenue: {_get_prefix()}%{{value:,.0f}}<br>Share: %{{percent}}<extra></extra>"
+    fig.update_traces(
+        hovertemplate=hover,
+        textinfo="percent",
+        textposition="inside",
+        insidetextorientation="horizontal",
+        marker=dict(line=dict(color=BLITZ_COLORS["white"], width=1))
+    )
+    
+    _apply_base_layout(fig, title)
+    
+    # Override legend for donut
+    fig.update_layout(
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.1,
+            xanchor="center",
+            x=0.5,
+        ),
+        margin=dict(t=40 if title else 20, b=40, l=20, r=20)
+    )
     return fig
 
 
@@ -253,9 +338,9 @@ def comparison_bar_chart(
         if y_format == "pct" and color else
         "<b>%{x}</b><br>Value: %{y:.1%}<extra></extra>"
         if y_format == "pct" else
-        "<b>%{fullData.name}</b><br>%{x}<br>Value: Rp%{y:,.0f}<extra></extra>"
+        f"<b>%{{fullData.name}}</b><br>%{{x}}<br>Value: {_get_prefix()}%{{y:,.0f}}<extra></extra>"
         if color else
-        "<b>%{x}</b><br>Value: Rp%{y:,.0f}<extra></extra>"
+        f"<b>%{{x}}</b><br>Value: {_get_prefix()}%{{y:,.0f}}<extra></extra>"
     )
     fig.update_traces(hovertemplate=hover, marker_line_width=0, opacity=0.92)
     _apply_base_layout(fig, title)
@@ -300,7 +385,7 @@ def stacked_area_chart(
         color_discrete_sequence=PLOTLY_COLOR_SEQUENCE,
     )
     fig.update_traces(
-        hovertemplate="<b>%{fullData.name}</b><br>Period: %{x}<br>Revenue: Rp%{y:,.0f}<extra></extra>",
+        hovertemplate=f"<b>%{{fullData.name}}</b><br>Period: %{{x}}<br>Revenue: {_get_prefix()}%{{y:,.0f}}<extra></extra>",
         line=dict(width=1.5),
         connectgaps=False,   # honest gaps where data is missing
     )
@@ -350,7 +435,7 @@ def entity_revenue_line_chart(
     fig.update_traces(
         # With hovermode="x unified" the month is shown once at the top;
         # each trace only needs to show entity name + value.
-        hovertemplate="<b>%{fullData.name}</b>: Rp%{y:,.0f}<extra></extra>",
+        hovertemplate=f"<b>%{{fullData.name}}</b>: {_get_prefix()}%{{y:,.0f}}<extra></extra>",
         line=dict(width=2.5),
         marker=dict(size=7, line=dict(width=1.5, color="rgba(0,0,0,0)")),
         connectgaps=False,
@@ -398,7 +483,7 @@ def waterfall_chart(
             measure=measures,
             x=labels,
             y=values,
-            text=[fmt_idr(v) for v in values],
+            text=[_fmt_converted(v) for v in values],
             textposition="outside",
             textfont=dict(size=11),
             cliponaxis=False,
@@ -447,7 +532,7 @@ def treemap_chart(
     )
     fig.update_traces(
         texttemplate="<b>%{label}</b>",
-        hovertemplate="<b>%{label}</b><br>Value: Rp%{value:,.0f}<extra></extra>",
+        hovertemplate=f"<b>%{{label}}</b><br>Value: {_get_prefix()}%{{value:,.0f}}<extra></extra>",
         textfont=dict(size=12, family="Inter, sans-serif"),
         marker=dict(pad=dict(t=18, l=4, r=4, b=4)),
     )
@@ -481,7 +566,7 @@ def mini_line_chart(
         color_discrete_map=ENTITY_COLORS,
         color_discrete_sequence=PLOTLY_COLOR_SEQUENCE,
     )
-    fig.update_traces(hovertemplate=_IDR_HOVER, line=dict(width=2))
+    fig.update_traces(hovertemplate=f"<b>%{{fullData.name}}</b><br>Period: %{{x}}<br>%{{fullData.name}}: {_get_prefix()}%{{y:,.0f}}<extra></extra>", line=dict(width=2))
     _apply_base_layout(fig, title)
     fig.update_layout(
         showlegend=False,
@@ -526,7 +611,7 @@ def pareto_chart(
             marker_color=BLITZ_COLORS["primary"],
             marker_line_width=0,
             opacity=0.85,
-            hovertemplate="<b>%{x}</b><br>%{y:,.0f} IDR<extra></extra>",
+            hovertemplate=f"<b>%{{x}}</b><br>{_get_prefix()}%{{y:,.0f}}<extra></extra>",
         )
     )
     fig.add_trace(
@@ -593,7 +678,7 @@ def variance_bar_chart(
             marker_color=BLITZ_COLORS["border"],
             marker_line_width=0,
             opacity=0.6,
-            hovertemplate="<b>%{y}</b><br>Prior: %{x:,.0f} IDR<extra></extra>",
+            hovertemplate=f"<b>%{{y}}</b><br>Prior: {_get_prefix()}%{{x:,.0f}}<extra></extra>",
         )
     )
     fig.add_trace(
@@ -605,7 +690,7 @@ def variance_bar_chart(
             marker_color=BLITZ_COLORS["primary_hover"],
             marker_line_width=0,
             opacity=0.9,
-            hovertemplate="<b>%{y}</b><br>Current: %{x:,.0f} IDR<extra></extra>",
+            hovertemplate=f"<b>%{{y}}</b><br>Current: {_get_prefix()}%{{x:,.0f}}<extra></extra>",
         )
     )
     _apply_base_layout(fig, title)
@@ -616,7 +701,58 @@ def variance_bar_chart(
         height=max(200, len(labels) * 50),
     )
     fig.update_yaxes(tickfont=dict(size=11))
-    fig.update_xaxes(tickprefix="Rp", tickformat="~s")
+    fig.update_xaxes(tickprefix=_get_prefix(), tickformat="~s")
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: Reusable Power BI-Style Components
+# ---------------------------------------------------------------------------
+
+def apply_blitz_chart_theme(fig: go.Figure, title: str = "") -> go.Figure:
+    """Public API to apply centralized Plotly defaults for the BI dashboard.
+    
+    Configures background, font, axes, gridlines, margins, hover mode, 
+    legend, and title styling. Future charts outside this module can use this.
+    """
+    return _apply_base_layout(fig, title)
+
+
+def render_sparkline(
+    values: list[float], 
+    color: str | None = None,
+    height: int = 50,
+) -> go.Figure:
+    """Return a minimal-noise mini-trend chart without axes.
+    
+    Designed specifically to be embedded within a KPI card.
+    """
+    if color is None:
+        color = BLITZ_COLORS["text_secondary"]
+        
+    df = pd.DataFrame({"y": values, "x": range(len(values))})
+    
+    fig = px.line(
+        df, x="x", y="y", 
+        color_discrete_sequence=[color]
+    )
+    fig.update_traces(
+        line=dict(width=2),
+        hoverinfo="skip",
+        hovertemplate=None
+    )
+    
+    fig.update_layout(
+        height=height,
+        margin=dict(l=0, r=0, t=5, b=5),
+        showlegend=False,
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        hovermode=False,
+    )
+    fig.update_xaxes(visible=False, showgrid=False, zeroline=False)
+    fig.update_yaxes(visible=False, showgrid=False, zeroline=False)
+    
     return fig
 
 
@@ -655,8 +791,8 @@ def margin_multi_line(
     )
     # ΔPP annotations for each series
     for trace in fig.data:
-        xs = list(trace.x) if trace.x is not None else []
-        ys = list(trace.y) if trace.y is not None else []
+        xs = list(getattr(trace, "x", []))
+        ys = list(getattr(trace, "y", []))
         for i in range(1, len(ys)):
             try:
                 delta_pp = (float(ys[i]) - float(ys[i - 1])) * 100
@@ -745,7 +881,7 @@ def annotated_trend_chart(
                         color=_resolved_color_map(df, color, color_map).get(str(cat_val), BLITZ_COLORS["text_secondary"]),
                     ),
                     opacity=0.65,
-                    hovertemplate=f"<b>{cat_val} {rolling_avg_label}</b><br>%{{x}}<br>Rp%{{y:,.0f}}<extra></extra>",
+                    hovertemplate=f"<b>{cat_val} {rolling_avg_label}</b><br>%{{x}}<br>{_get_prefix()}%{{y:,.0f}}<extra></extra>",
                     showlegend=True,
                 ))
         else:
@@ -758,7 +894,7 @@ def annotated_trend_chart(
                 name=rolling_avg_label,
                 line=dict(dash="dash", width=1.5, color=BLITZ_COLORS["text_secondary"]),
                 opacity=0.7,
-                hovertemplate=f"<b>{rolling_avg_label}</b><br>%{{x}}<br>Rp%{{y:,.0f}}<extra></extra>",
+                hovertemplate=f"<b>{rolling_avg_label}</b><br>%{{x}}<br>{_get_prefix()}%{{y:,.0f}}<extra></extra>",
                 showlegend=True,
             ))
 
@@ -768,8 +904,6 @@ def annotated_trend_chart(
 
     # ── Chart annotations (peak/trough/MoM markers) ─────────────────────
     if annotations:
-        from streamlit_app.constants import fmt_idr  # noqa: PLC0415
-
         _ANNOTATION_COLORS = {
             "peak":     BLITZ_COLORS["primary"],
             "trough":   "#CF222E",
@@ -786,7 +920,7 @@ def annotated_trend_chart(
             fig.add_annotation(
                 x=ann.month,
                 y=ann.value,
-                text=f"<b>{symbol} {ann.label}</b><br>{fmt_idr(ann.value)}",
+                text=f"<b>{symbol} {ann.label}</b><br>{_fmt_converted(ann.value)}",
                 showarrow=True,
                 arrowhead=2,
                 arrowsize=0.8,
@@ -826,7 +960,7 @@ def add_reference_line(
     dash:
         Plotly dash style: "dot", "dash", "dashdot".
     """
-    from streamlit_app.constants import fmt_idr  # noqa: PLC0415
+    from streamlit_app.components.filters import fmt_display
 
     line_color = color or BLITZ_COLORS["text_secondary"]
     fig.add_hline(
@@ -835,7 +969,7 @@ def add_reference_line(
         line_color=line_color,
         line_width=1.2,
         opacity=0.6,
-        annotation_text=f" {label}: {fmt_idr(value)}",
+        annotation_text=f" {label}: {_fmt_converted(value)}",
         annotation_position="right",
         annotation_font=dict(size=9, color=line_color, family="Inter, sans-serif"),
     )

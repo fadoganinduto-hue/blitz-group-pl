@@ -70,10 +70,15 @@ def render_kpi_row(
                 else f"${current_display:,.0f} as of {latest_month}"
             )
 
+            # Cost metrics (COGS, OpEx): an increase is unfavorable → inverse color semantics
+            _COST_METRICS = {"Total COGS", "Total Operating Expenses"}
+            delta_color = "inverse" if metric in _COST_METRICS else "normal"
+
             st.metric(
                 label=metric,
                 value=fmt_display(current_val),
                 delta=delta_str,
+                delta_color=delta_color,
                 help=base_help + yoy_help_suffix,
                 border=True,
                 chart_data=sparkline_vals if len(sparkline_vals) > 1 else None,
@@ -98,3 +103,98 @@ def render_single_kpi(
         chart_data=sparkline if sparkline and len(sparkline) > 1 else None,
         chart_type="line",
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: Reusable Power BI-Style Components
+# ---------------------------------------------------------------------------
+
+def render_variance_badge(value_str: str, semantic_status: str = "neutral") -> str:
+    """Return HTML for a small colored variance/status badge.
+    
+    semantic_status must be one of: 'positive', 'negative', 'warning', 'neutral'.
+    """
+    from streamlit_app.constants import BLITZ_COLORS
+    from html import escape
+
+    bg_colors = {
+        "positive": "#DAFBE1",
+        "negative": "#FFEBE9",
+        "warning": "#FFF8C5",
+        "neutral": BLITZ_COLORS["background"]
+    }
+    text_colors = {
+        "positive": "#1A7F37",
+        "negative": "#CF222E",
+        "warning": "#BF8700",
+        "neutral": BLITZ_COLORS["text_secondary"]
+    }
+    
+    bg = bg_colors.get(semantic_status, bg_colors["neutral"])
+    color = text_colors.get(semantic_status, text_colors["neutral"])
+    
+    # Do not use leading whitespace or newlines, otherwise Streamlit parses it as a Markdown code block
+    return f'<span style="background: {bg}; color: {color}; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700;">{escape(value_str)}</span>'
+
+
+def render_bi_kpi_card(
+    title: str,
+    current_value: str,
+    comparison_value: str | None = None,
+    variance_abs: str | None = None,
+    variance_pct: str | None = None,
+    direction: str | None = None,
+    semantic_status: str = "neutral",
+    subtitle: str | None = None,
+    sparkline_fig: "plotly.graph_objects.Figure | None" = None,
+    size: str = "large",
+) -> None:
+    """Render a comprehensive BI-style KPI card.
+    
+    Supports title, current value, absolute variance, percentage variance, 
+    comparison baseline, semantic direction/status, and an optional sparkline.
+    """
+    from streamlit_app.constants import BLITZ_COLORS
+    from html import escape
+    from streamlit_app.components.charts import render_plotly_chart
+    
+    parts = []
+    if direction == "up":
+        parts.append("▲")
+    elif direction == "down":
+        parts.append("▼")
+    elif direction == "flat":
+        parts.append("▶")
+        
+    if variance_pct:
+        parts.append(variance_pct)
+    if variance_abs:
+        parts.append(f"({variance_abs})")
+        
+    badge_html = ""
+    if parts:
+        badge_html = render_variance_badge(" ".join(parts), semantic_status)
+        
+    comp_html = ""
+    if comparison_value:
+        comp_html = f"<span style='font-size: 11px; color: {BLITZ_COLORS['text_secondary']}; margin-left: 6px;'>vs {escape(comparison_value)}</span>"
+
+    title_size = "11px" if size == "large" else "10px"
+    val_size = "24px" if size == "large" else "20px"
+    title_html = f"<div style='font-size: {title_size}; font-weight: 700; color: {BLITZ_COLORS['text_secondary']}; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 8px;'>{escape(title)}</div>"
+    val_html = f"<div style='font-size: {val_size}; font-weight: 800; color: {BLITZ_COLORS['text_primary']}; line-height: 1.1; margin-bottom: 6px;'>{escape(current_value)}</div>"
+    metrics_row_html = f"<div style='display: flex; align-items: center; margin-bottom: 8px; min-height: 20px;'>{badge_html} {comp_html}</div>"
+    
+    footer_html = ""
+    if subtitle:
+        footer_html = f"<div style='font-size: 11px; color: {BLITZ_COLORS['text_secondary']}; margin-top: 8px; padding-top: 8px; border-top: 1px solid {BLITZ_COLORS['border']}44;'>{escape(subtitle)}</div>"
+        
+    with st.container(border=True):
+        st.markdown(title_html + val_html + metrics_row_html, unsafe_allow_html=True)
+        
+        if sparkline_fig:
+            safe_key = f"sparkline_{title.replace(' ', '_').lower()}"
+            render_plotly_chart(sparkline_fig, key=safe_key)
+            
+        if footer_html:
+            st.markdown(footer_html, unsafe_allow_html=True)
