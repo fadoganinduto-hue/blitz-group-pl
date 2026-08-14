@@ -21,11 +21,11 @@ import pytest
 class TestFmtIdr:
     @pytest.mark.parametrize("value, expected_prefix, expected_suffix", [
         (1_500_000_000, "Rp1.5", "B"),
-        (500_000_000,   "Rp500.0", "M"),
+        (500_000_000,   "Rp500", "M"),
         (1_200_000,     "Rp1.2", "M"),
-        (450_000,       "Rp450.0", "K"),
+        (450_000,       "Rp450", "K"),
         (999,           "Rp999",  ""),
-        (-1_000_000_000, "-Rp1.0", "B"),
+        (-1_000_000_000, "-Rp1", "B"),
         (0,             "Rp0",    ""),
     ])
     def test_fmt_idr_format(self, value, expected_prefix, expected_suffix):

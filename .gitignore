@@ -4,7 +4,9 @@ __pycache__/
 .venv/
 venv/
 .env
+# Never commit the live P&L workbook — it holds real financials.
+# Golden tests locate it via GROUP_PL_WORKBOOK or tests/fixtures/ at runtime.
 *.xlsx
-!tests/fixtures/*.xlsx
+tests/fixtures/
 .DS_Store
 .vscode/
