@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 import json
+from typing import Any
+
 import pandas as pd
 import streamlit as st
-from google import genai
-from google.genai import types
+
+# The AI tab is optional. Importing google-genai at module scope made a missing
+# or broken install crash the ENTIRE dashboard at startup (app.py imports this
+# module for its sidebar status line), taking the P&L views down with it.
+try:  # pragma: no cover - exercised by environments without the extra
+    from google import genai
+    from google.genai import types
+    GENAI_AVAILABLE = True
+    GENAI_IMPORT_ERROR: str | None = None
+except Exception as _exc:  # noqa: BLE001
+    genai = None  # type: ignore[assignment]
+    types = None  # type: ignore[assignment]
+    GENAI_AVAILABLE = False
+    GENAI_IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
 
 from streamlit_app.constants import fmt_idr
 from streamlit_app.data.parsers import (
@@ -36,12 +50,12 @@ def _get_api_key() -> str | None:
 
 
 def is_api_configured() -> bool:
-    """Check whether a valid Gemini API key is present."""
-    return _get_api_key() is not None
+    """Check whether the AI tab can run: package installed AND key present."""
+    return GENAI_AVAILABLE and _get_api_key() is not None
 
 
 @st.cache_resource(show_spinner=False)
-def _get_client(api_key: str) -> genai.Client:
+def _get_client(api_key: str) -> Any:
     """Return a cached Gemini client instance."""
     return genai.Client(api_key=api_key)
 
