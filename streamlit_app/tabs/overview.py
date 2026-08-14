@@ -16,6 +16,10 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
+from streamlit_app.data.periods import (
+    latest_actual_month as latest_actual_month_of,
+    restrict_to_actuals,
+)
 from streamlit_app.data.parsers import parse_master, parse_pl_sheet, parse_ratios
 from streamlit_app.data.loader import parse_all_entity_sheets
 from streamlit_app.data.analytics import (
@@ -93,7 +97,16 @@ def render(sheets: dict[str, pd.DataFrame]) -> None:
         )
         return
 
-    latest_month = filtered_months[-1]
+    # Never take months[-1]: the workbook carries a full 12-month grid, so the
+    # tail months of the current year are present but not yet closed. Taking the
+    # last one made every executive KPI read Rp0 with a -100% MoM.
+    actual_filtered = restrict_to_actuals(filtered_months, cons_long)
+    latest_month = (
+        actual_filtered[-1] if actual_filtered
+        else (latest_actual_month_of(cons_long) or filtered_months[-1])
+    )
+    # Comparisons and averages must also ignore unclosed months.
+    filtered_months = actual_filtered or filtered_months
     prior_month = get_compare_month(filtered_months, latest_month, all_months)
 
     # ── Top Filter Bar ───────────────────────────────────────────────

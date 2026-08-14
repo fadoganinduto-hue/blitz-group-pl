@@ -63,6 +63,30 @@ _OPEX_SECTION_KEYWORDS: frozenset[str] = frozenset(
     {"operating expense", "opex", "operating cost", "g&a", "selling", "overhead"}
 )
 
+# Explicit section-start labels.
+#
+# The original implementation inferred section headers from "rows with no numeric
+# values". That heuristic never fires on the real workbook, because the section
+# header rows ("COGS", "Operating Expenses") carry values of their own — so
+# ``current_section`` stayed empty and BOTH Depreciation rows kept the ambiguous
+# label "Depreciation". Downstream that summed Rp48.4M of COGS depreciation into
+# the OpEx breakdown. Sections are now driven by an explicit label map, with the
+# no-numbers heuristic retained only as a fallback for layouts we haven't seen.
+_SECTION_STARTS: dict[str, str] = {
+    "gross revenue": "Revenue",
+    "revenue": "Revenue",
+    "cogs": "COGS",
+    "cost of goods sold": "COGS",
+    "operating expenses": "Operating Expenses",
+    "opex": "Operating Expenses",
+    "other income and expenses": "Other Income and Expenses",
+}
+
+
+def _section_for_label(label: str, current_section: str) -> str:
+    """Return the section this row starts, or the unchanged current section."""
+    return _SECTION_STARTS.get(label.strip().lower(), current_section)
+
 
 def _disambiguate_depreciation(label: str, current_section: str) -> str:
     """Append (COGS) or (OpEx) to 'Depreciation' rows based on their section header."""
@@ -107,12 +131,17 @@ def parse_pl_sheet(raw: pd.DataFrame, entity: str) -> pd.DataFrame:
         if USD_BLOCK_MARKER in label_lower or "does not tie to main p&l" in label_lower:
             break
 
-        # Track section headers (rows with no numeric values in month columns)
+        # Track sections. Section-start rows carry values of their own on this
+        # workbook, so the section is updated BEFORE the no-numbers fallback and
+        # the row is still recorded.
+        current_section = _section_for_label(label_raw, current_section)
+
         row_has_numbers = any(
             isinstance(raw.iloc[row_idx, c], (int, float))
             for c in month_col_indices
         )
         if not row_has_numbers:
+            # Fallback for layouts where headers genuinely have no values.
             current_section = label_raw.strip()
             continue
 
@@ -156,6 +185,7 @@ def parse_ratios(raw: pd.DataFrame, entity: str) -> pd.DataFrame:
 
     month_col_indices = _detect_month_cols(raw, header_row_idx)
     records: list[dict] = []
+    last_basis: str = ""
 
     for row_idx in range(header_row_idx + 1, len(raw)):
         label_raw = raw.iloc[row_idx, 1]
@@ -165,7 +195,17 @@ def parse_ratios(raw: pd.DataFrame, entity: str) -> pd.DataFrame:
         if USD_BLOCK_MARKER in label_lower:
             break
         if label_lower not in RATIO_LABELS:
+            # Remember the subtotal this ratio row will refer to. The sheet has
+            # TWO rows literally labelled "Margin %" (one under Gross Profit 1,
+            # one under Gross Profit 2). Keying purely on the label collapsed
+            # them into a single zig-zagging series.
+            last_basis = label_raw.strip()
             continue
+
+        basis = last_basis
+        metric = label_raw.strip()
+        if metric.lower() == "margin %" and basis:
+            metric = f"Margin % ({basis})"
 
         for col_idx in month_col_indices:
             val = raw.iloc[row_idx, col_idx]
@@ -174,7 +214,9 @@ def parse_ratios(raw: pd.DataFrame, entity: str) -> pd.DataFrame:
                 records.append(
                     {
                         "Entity": entity,
-                        "Metric": label_raw.strip(),
+                        "Metric": metric,
+                        "RatioLabel": label_raw.strip(),
+                        "Basis": basis,
                         "Month": month_label,
                         "Value": float(val),
                     }
@@ -218,6 +260,24 @@ def parse_master(raw: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     master = master[MASTER_NEEDED_COLS].dropna(subset=["Entity"])
     master["Amount (IDR)"] = pd.to_numeric(master["Amount (IDR)"], errors="coerce").fillna(0)
     master["MonthDate"] = master["Month"].apply(month_sort_key)
+
+    # MASTER stores months as "Jan-25"; the P&L sheets store them as "Jan 2026".
+    # Every downstream join did `master["Month"] == "<P&L label>"`, which matched
+    # zero rows on every month — so the per-client cards were permanently blank.
+    # Keep the sheet's own text in MonthRaw and normalise Month to the canonical
+    # "%b %Y" label used everywhere else in the app.
+    master["MonthRaw"] = master["Month"]
+    canonical = master["MonthDate"].dt.strftime("%b %Y")
+    master["Month"] = canonical.where(
+        master["MonthDate"].notna(), master["MonthRaw"].astype(str)
+    )
+
+    # Trailing/leading whitespace in client names silently creates duplicate
+    # clients in every groupby. Full alias consolidation lands in Phase 2.
+    master["Client (clean)"] = master["Client (clean)"].astype("object")
+    _names = master["Client (clean)"]
+    master["Client (clean)"] = _names.where(_names.isna(), _names.astype(str).str.strip())
+
     master = master.sort_values("MonthDate").reset_index(drop=True)
     return master, []
 
@@ -310,11 +370,56 @@ def parse_wip_margin(raw: pd.DataFrame) -> dict[str, pd.DataFrame]:
 # TIE-OUT CHECK sheet
 # ---------------------------------------------------------------------------
 
+# The sheet marks true reconciliation deltas with a leading Δ. Everything else on
+# the sheet is either a component being reconciled (MASTER total, Tracker total,
+# Direct P&L total) or a free-text adjustment memo.
+_DELTA_MARKER: str = "Δ"  # Δ
+
+KIND_DELTA: str = "delta"
+KIND_COMPONENT: str = "component"
+KIND_ADJUSTMENT: str = "adjustment"
+
+TIE_OUT_COLUMNS: list[str] = [
+    "Scope", "Label", "Kind", "Month", "Delta", "MonthDate", "Category",
+]
+
+
+def _tie_out_label(raw: pd.DataFrame, row_idx: int) -> tuple[str, bool]:
+    """Return (label_text, is_indented) for a TIE-OUT row.
+
+    Indentation is the sheet's own structure: scope headers sit flush left,
+    the components and deltas belonging to them are indented.
+    """
+    for col_idx in (0, 1):
+        if col_idx >= raw.shape[1]:
+            continue
+        val = raw.iloc[row_idx, col_idx]
+        if isinstance(val, str) and val.strip():
+            return val.strip(), val != val.lstrip()
+    return "", False
+
+
 @st.cache_data(show_spinner=False, max_entries=12)
 def parse_tie_out(raw: pd.DataFrame) -> pd.DataFrame:
-    """Parse the TIE-OUT CHECK sheet into a tidy DataFrame of reconciliation deltas."""
-    records: list[dict] = []
+    """Parse the TIE-OUT CHECK sheet into tidy reconciliation rows.
 
+    The previous implementation treated **every numeric cell on the sheet** as a
+    variance. That made the Data Health tab report the MASTER revenue total
+    (~Rp3.0B) as the month's single largest "discrepancy", while the actual
+    reconciliation deltas — the handful of Δ rows, typically Rp5M–Rp300M — were
+    buried below it.
+
+    This parser preserves the sheet's structure instead:
+
+    * ``Kind == "delta"``      → a real variance (row label starts with Δ).
+      **These, and only these, may be reported as reconciliation exceptions.**
+    * ``Kind == "component"``  → an input to a reconciliation (MASTER total,
+      Revenue Tracker total, Direct P&L total). Context, never a variance.
+    * ``Kind == "adjustment"`` → a named manual adjustment memo.
+
+    ``Scope`` carries the block the row belongs to (Blitz, Borzo, TheLorry,
+    "BLITZ — 2025 (historical)", …).
+    """
     # Find the first row that has recognisable month column headers
     header_row_idx: int | None = None
     month_col_indices: list[int] = []
@@ -339,32 +444,67 @@ def parse_tie_out(raw: pd.DataFrame) -> pd.DataFrame:
             break
 
     if header_row_idx is None:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=TIE_OUT_COLUMNS)
 
-    # Scan data rows
+    # Pre-scan labels so a flush-left row can be classified as a scope header
+    # (followed by indented children) rather than a standalone adjustment memo.
+    labels: dict[int, tuple[str, bool]] = {}
     for row_idx in range(header_row_idx + 1, len(raw)):
-        label_raw = raw.iloc[row_idx, 0]
-        if not isinstance(label_raw, str):
-            label_raw = ""
-        label2 = raw.iloc[row_idx, 1] if len(raw.columns) > 1 else ""
-        row_label = label_raw.strip() or (str(label2).strip() if isinstance(label2, str) else "")
-        if not row_label:
-            continue
+        text, indented = _tie_out_label(raw, row_idx)
+        if text:
+            labels[row_idx] = (text, indented)
+
+    ordered_rows = sorted(labels)
+
+    def _starts_block(row_idx: int) -> bool:
+        """True when the next labelled row is indented under this one."""
+        position = ordered_rows.index(row_idx)
+        for following in ordered_rows[position + 1: position + 3]:
+            if labels[following][1]:
+                return True
+        return False
+
+    records: list[dict] = []
+    current_scope: str = ""
+
+    for row_idx in ordered_rows:
+        row_label, indented = labels[row_idx]
+
+        if not indented:
+            if _starts_block(row_idx):
+                current_scope = row_label
+                # Scope headers are structural; they carry no values of their own.
+                continue
+            kind = KIND_ADJUSTMENT
+        elif _DELTA_MARKER in row_label:
+            kind = KIND_DELTA
+        else:
+            kind = KIND_COMPONENT
 
         for col_idx, month_label in zip(month_col_indices, month_labels):
             val = raw.iloc[row_idx, col_idx]
-            if isinstance(val, (int, float)):
+            if isinstance(val, (int, float)) and not pd.isna(val):
                 records.append(
                     {
+                        "Scope": current_scope,
                         "Label": row_label,
+                        "Kind": kind,
                         "Month": month_label,
                         "Delta": float(val),
                         "MonthDate": month_sort_key(month_label),
+                        "Category": current_scope or "Unscoped",
                     }
                 )
 
     if not records:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=TIE_OUT_COLUMNS)
 
-    df = pd.DataFrame(records).sort_values("MonthDate").reset_index(drop=True)
-    return df
+    return pd.DataFrame(records).sort_values("MonthDate").reset_index(drop=True)
+
+
+def tie_out_deltas(raw: pd.DataFrame) -> pd.DataFrame:
+    """Return ONLY the true reconciliation variances from the TIE-OUT sheet."""
+    df = parse_tie_out(raw)
+    if df.empty or "Kind" not in df.columns:
+        return df
+    return df[df["Kind"] == KIND_DELTA].reset_index(drop=True)

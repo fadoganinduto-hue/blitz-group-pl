@@ -22,6 +22,7 @@ from streamlit_app.components.filters import (
 from streamlit_app.components.kpi_cards import render_single_kpi
 from streamlit_app.components.ui import render_page_header, render_section_header, render_section_safe
 from streamlit_app.constants import BLITZ_COLORS, ENTITY_COLORS, fmt_idr, fmt_idr_full
+from streamlit_app.data.periods import restrict_to_actuals
 from streamlit_app.data.parsers import parse_master
 from streamlit_app.data.analytics import compute_revenue_drivers
 from streamlit_app.data.anomaly_config import ANOMALY_THRESHOLDS
@@ -277,7 +278,17 @@ def _render_churn_analysis(
     st.markdown("##### :material/compare_arrows: Movement (vs 3 months prior)")
     if not filtered_months:
         return
-    latest = filtered_months[-1]
+    # Only compare against a CLOSED month. Using the last filtered month made
+    # the entire book look churned whenever the current month was unclosed or
+    # only partially loaded.
+    closed = restrict_to_actuals(filtered_months, master, value_col="Amount (IDR)")
+    if not closed:
+        st.caption("No closed month in the current selection — movement not computed.")
+        return
+    latest = closed[-1]
+    if latest not in all_months:
+        st.caption("Latest closed month is outside the loaded range.")
+        return
     lookback_idx = all_months.index(latest) - 3 if all_months.index(latest) >= 3 else None
     if lookback_idx is None:
         st.caption("Need at least 3 months of history to compute churn.")

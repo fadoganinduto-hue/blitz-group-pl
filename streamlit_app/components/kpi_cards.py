@@ -58,8 +58,14 @@ def render_kpi_row(
                         yoy_sign = "▲" if yoy_pct >= 0 else "▼"
                         yoy_help_suffix = f"  |  YoY: {yoy_sign} {abs(yoy_pct):.1f}%  (vs {yoy_month})"
 
-            # Sparkline: aggregate by MonthDate to ensure 1 point per month, then take last 12
+            # Sparkline: aggregate by MonthDate to ensure 1 point per month, then take last 12.
+            # Trim to the headline month first — the workbook carries unclosed
+            # future columns, and including them drew every card falling to zero
+            # to the right of a value labelled "as of <latest_month>".
             agg_df = metric_df.groupby("MonthDate", as_index=False)["Value"].sum().sort_values("MonthDate")
+            _latest_dates = metric_df.loc[metric_df["Month"] == latest_month, "MonthDate"]
+            if not _latest_dates.empty:
+                agg_df = agg_df[agg_df["MonthDate"] <= _latest_dates.max()]
             sparkline_vals: list[float] = [float(v) for v in agg_df["Value"].tail(12).tolist()]
 
             current_display = convert_value(current_val)
