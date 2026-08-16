@@ -713,3 +713,57 @@ def render_metric_table(df: pd.DataFrame, height: int | None = None) -> None:
         hide_index=True,
         height=height,
     )
+
+
+# ---------------------------------------------------------------------------
+# Data-source provenance
+# ---------------------------------------------------------------------------
+
+def render_source_banner(ref: object) -> None:
+    """State exactly which workbook is on screen, and how fresh it is.
+
+    A dashboard that cannot name its own source is not a control. The Finance
+    folder holds a dozen `Group_PL_*` variants, and a board pack was once built
+    from a stale one — this strip exists so that can never happen silently.
+    """
+    import streamlit as st  # noqa: PLC0415
+
+    name = getattr(ref, "name", "unknown")
+    origin = getattr(ref, "origin", "unknown")
+    detail = getattr(ref, "detail", "")
+    is_live = bool(getattr(ref, "is_live", False))
+    modified = getattr(ref, "modified_label", "unknown")
+    age = getattr(ref, "age_hint", "")
+    modified_by = getattr(ref, "modified_by", None)
+
+    if is_live:
+        accent, chip_bg, icon, chip = "#1A7F37", "#DAFBE1", "🟢", "LIVE"
+    else:
+        accent, chip_bg, icon, chip = "#BF8700", "#FFF8C5", "🟡", "MANUAL"
+
+    by = f" by {escape(str(modified_by))}" if modified_by else ""
+    age_txt = f" · {escape(age)}" if age else ""
+    detail_txt = escape(str(detail))
+    if len(detail_txt) > 110:
+        detail_txt = detail_txt[:107] + "…"
+
+    st.markdown(
+        f"""
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+            background:{BLITZ_COLORS['off_white']};border:1px solid {BLITZ_COLORS['border']};
+            border-left:4px solid {accent};border-radius:8px;
+            padding:9px 16px;margin:0 0 14px 0;">
+          <span style="background:{chip_bg};color:{accent};font-size:10px;font-weight:800;
+            letter-spacing:0.08em;padding:2px 8px;border-radius:4px;white-space:nowrap;">
+            {icon} {chip}</span>
+          <span style="font-size:13px;font-weight:700;color:{BLITZ_COLORS['text_primary']};">
+            {escape(str(name))}</span>
+          <span style="font-size:11px;color:{BLITZ_COLORS['text_secondary']};">
+            {escape(str(origin))} · modified {escape(str(modified))}{by}{age_txt}</span>
+          <span style="font-size:10px;color:{BLITZ_COLORS['text_secondary']};
+            margin-left:auto;font-family:ui-monospace,monospace;opacity:0.75;">
+            {detail_txt}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )

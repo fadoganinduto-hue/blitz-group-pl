@@ -21,8 +21,36 @@ from streamlit_app.components.ui import (
     apply_global_visual_system,
     render_app_footer,
     render_app_header,
+    render_source_banner,
 )
-from streamlit_app.data.loader import load_workbook, _file_hash
+from streamlit_app.data.loader import (
+    WorkbookBytes,
+    load_sheets_from_bytes,
+)
+from streamlit_app.data.sources import (
+    UploadedWorkbook,
+    WorkbookRef,
+    WorkbookUnavailable,
+    build_source,
+)
+
+
+def _probe(source: object) -> str:
+    """Cheap freshness key: the eTag / mtime that identifies the current file."""
+    return source.describe().fingerprint
+
+
+@st.cache_data(show_spinner="Fetching workbook from source…", max_entries=3)
+def fetch_workbook(_source: object, fingerprint: str) -> tuple[WorkbookRef, bytes]:
+    """Download the workbook, cached on its fingerprint.
+
+    ``_source`` is underscore-prefixed so it is excluded from the cache key —
+    the fingerprint already identifies the file exactly, and re-downloading a
+    600KB workbook on every filter change would hammer Graph for nothing.
+    Metadata and bytes are returned together from a single resolution, so the
+    provenance banner can never describe a different version than the figures.
+    """
+    return _source.load()
 from streamlit_app.data.parsers import parse_master, parse_pl_sheet as _parse_pl
 from streamlit_app.data.validator import validate_workbook
 from streamlit_app.ai_service import is_api_configured
@@ -63,18 +91,68 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-    st.subheader(":material/upload_file: Data source")
-    uploaded_file = st.file_uploader(
-        "Upload the Group P&L workbook (.xlsx)",
-        type=["xlsx"],
-        label_visibility="collapsed",
-    )
-    st.caption("Upload your workbook to activate all views. Re-upload when updated.")
+    st.subheader(":material/database: Data source")
+
+    _source, _source_warning = build_source(st.secrets)
+    if _source_warning:
+        st.warning(_source_warning, icon=":material/warning:")
+
+    uploaded_file = None
+    workbook_ref = None
+    workbook_bytes = None
+
+    if _source is not None:
+        if st.button(
+            ":material/refresh: Refresh from source",
+            width="stretch",
+            help="Re-read the workbook and rebuild every view.",
+        ):
+            st.cache_data.clear()
+            st.rerun()
+
+        with st.expander(":material/upload_file: Use a different file", expanded=False):
+            st.caption(
+                "For what-if analysis only. A file uploaded here overrides the "
+                "live source until you clear it below."
+            )
+            _override = st.file_uploader(
+                "Override workbook (.xlsx)",
+                type=["xlsx"],
+                label_visibility="collapsed",
+                key="workbook_override",
+            )
+            if _override is not None:
+                uploaded_file = _override
+                st.warning(
+                    "Showing an uploaded file, not the live source.",
+                    icon=":material/warning:",
+                )
+
+        # Only touch the network if no override is active — otherwise every
+        # rerun would download a workbook nobody is looking at.
+        if uploaded_file is None:
+            try:
+                workbook_ref, workbook_bytes = fetch_workbook(_source, _probe(_source))
+            except WorkbookUnavailable as exc:
+                st.error(str(exc), icon=":material/cloud_off:")
+            except Exception as exc:  # noqa: BLE001 — never show a raw traceback
+                st.error(
+                    f"Unexpected problem reading the data source: "
+                    f"{type(exc).__name__}. Check the source configuration.",
+                    icon=":material/cloud_off:",
+                )
+    else:
+        uploaded_file = st.file_uploader(
+            "Upload the Group P&L workbook (.xlsx)",
+            type=["xlsx"],
+            label_visibility="collapsed",
+        )
+        st.caption("Upload your workbook to activate all views. Re-upload when updated.")
 
 # ---------------------------------------------------------------------------
 # Landing page (no file uploaded)
 # ---------------------------------------------------------------------------
-if uploaded_file is None:
+if uploaded_file is None and workbook_bytes is None:
     st.markdown(
         f"""
         <div style="
@@ -101,7 +179,7 @@ if uploaded_file is None:
                 background:{BLITZ_COLORS['pale_blue']};border:1px dashed {BLITZ_COLORS['light_blue']};
                 border-radius:8px;padding:10px 20px;font-size:13px;
                 color:{BLITZ_COLORS['deep_blue']};font-weight:600;">
-                ← Use the sidebar to upload your workbook
+                ← Use the sidebar to load your workbook
             </div>
             <div style="margin-top:28px;display:flex;justify-content:center;gap:20px;flex-wrap:wrap;">
                 <div style="font-size:11px;color:{BLITZ_COLORS['text_secondary']};text-align:center;">
@@ -126,10 +204,26 @@ if uploaded_file is None:
 # ---------------------------------------------------------------------------
 # Load workbook
 # ---------------------------------------------------------------------------
-# Compute and store the file hash so downstream cached calls share the same key
-_wb_hash = _file_hash(uploaded_file)
+# An explicit upload always wins over the live source, so what-if analysis is
+# possible without reconfiguring the app.
+if uploaded_file is not None:
+    workbook_bytes = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
+    workbook_ref = UploadedWorkbook(uploaded_file).describe()
+
+if workbook_ref is None or workbook_bytes is None:
+    st.error("No workbook could be loaded from the configured source.")
+    st.stop()
+
+# The fingerprint is the cache key: the SharePoint eTag, the file mtime+size, or
+# a content hash. Cached views therefore invalidate exactly when the underlying
+# file changes — not on a timer, and not never.
+_wb_hash = workbook_ref.fingerprint
 st.session_state["_wb_hash"] = _wb_hash
-sheets = load_workbook(uploaded_file)
+st.session_state["_workbook_ref"] = workbook_ref
+sheets = load_sheets_from_bytes(_wb_hash, workbook_bytes)
+
+# Present the bytes to the validator as a file-like object.
+uploaded_file = WorkbookBytes(workbook_ref.name, workbook_bytes)
 
 # ---------------------------------------------------------------------------
 # Workbook validation
@@ -180,7 +274,7 @@ if _wb_warnings:
                 unsafe_allow_html=True,
             )
 
-_upload_identity = (uploaded_file.name, uploaded_file.size)
+_upload_identity = (workbook_ref.name, workbook_ref.fingerprint)
 if st.session_state.get("_loaded_workbook_identity") != _upload_identity:
     st.session_state["_loaded_workbook_identity"] = _upload_identity
     st.session_state["_data_loaded_at"] = datetime.now().astimezone()
@@ -193,6 +287,9 @@ render_app_header(
     health_status=data_health.get_overall_health_status(sheets),
     refreshed_at=_data_loaded_at,
 )
+
+# Provenance strip — which workbook is this, and how fresh?
+render_source_banner(workbook_ref)
 
 # ---------------------------------------------------------------------------
 # Build global month list from Consolidated Summary for sidebar filters

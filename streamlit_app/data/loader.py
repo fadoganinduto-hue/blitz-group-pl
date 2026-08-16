@@ -13,12 +13,55 @@ Design notes
 from __future__ import annotations
 
 import hashlib
+import io
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 
 from streamlit_app.constants import ENTITY_DETAIL_SHEETS, ENTITY_SUMMARY_SHEETS
+
+
+class WorkbookBytes:
+    """An in-memory workbook that quacks like a Streamlit UploadedFile.
+
+    Lets the validator and every existing caller work unchanged whether the
+    bytes arrived from a browser upload, a synced folder, or SharePoint.
+    """
+
+    def __init__(self, name: str, data: bytes) -> None:
+        self.name = name
+        self._data = data
+        self._buffer = io.BytesIO(data)
+
+    @property
+    def size(self) -> int:
+        return len(self._data)
+
+    def read(self, *args: Any) -> bytes:
+        return self._buffer.read(*args)
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        return self._buffer.seek(offset, whence)
+
+    def getvalue(self) -> bytes:
+        return self._data
+
+
+@st.cache_data(ttl=None, max_entries=3, show_spinner="Loading workbook…")
+def load_sheets_from_bytes(fingerprint: str, _data: bytes) -> dict[str, pd.DataFrame]:
+    """Load every sheet from workbook bytes, cached on the source's fingerprint.
+
+    The fingerprint is the SharePoint eTag, the file mtime+size, or a content
+    hash — so the cache invalidates exactly when the underlying file changes.
+    There is deliberately no TTL: a time-based cache would either serve a stale
+    P&L or re-download the workbook on a timer, and neither is wanted.
+
+    ``_data`` is underscore-prefixed so Streamlit EXCLUDES it from the cache key
+    — digesting 600KB of workbook on every rerun is pure waste when the
+    fingerprint already identifies the file exactly.
+    """
+    return pd.read_excel(io.BytesIO(_data), sheet_name=None, header=None)
 
 
 # ---------------------------------------------------------------------------
@@ -48,10 +91,10 @@ def load_all_sheets(_file_bytes_hash: str, file: Any) -> dict[str, pd.DataFrame]
     Parameters
     ----------
     _file_bytes_hash:
-        MD5 digest of the file content — used as the primary cache key so
-        that different content always produces a fresh parse (the leading
-        underscore tells Streamlit to hash this argument directly, not the
-        object itself).
+        Digest of the file content — used as the primary cache key so that
+        different content always produces a fresh parse. (The leading
+        underscore EXCLUDES an argument from Streamlit's cache key; the digest
+        is what identifies the workbook here.)
     file:
         The Streamlit UploadedFile object (already seeked to position 0).
     """
