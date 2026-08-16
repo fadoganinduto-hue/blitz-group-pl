@@ -73,6 +73,32 @@ source** picks it up. No export, no upload.
 This is what you'll need once the dashboard runs on a server, where there's no
 OneDrive client and nobody signed in. The app authenticates as itself.
 
+### First: you may already have this
+
+The Blitz 3PL dashboard already reads SharePoint through an Azure AD app
+registration. If that app was granted `Files.Read.All` (tenant-wide read), it
+already covers the Finance site — **no new Azure work is needed.** Take the same
+three values from that app's Streamlit secrets:
+
+```toml
+[workbook]
+mode = "sharepoint"
+
+AZURE_TENANT_ID     = "<same as the 3PL dashboard>"
+AZURE_CLIENT_ID     = "<same as the 3PL dashboard>"
+AZURE_CLIENT_SECRET = "<same as the 3PL dashboard>"
+
+[files]
+GROUP_PL = "https://61nngljuq69wkvzlaiog9kkphca.sharepoint.com/sites/Finance/Shared Documents/Group PL/Group_PL_2026_Upload.xlsx"
+```
+
+Paste the URL straight from the browser address bar or the file's **⋯ → Copy
+link** menu — both work. That is the whole setup.
+
+If that app was scoped with `Sites.Selected` rather than `Files.Read.All`, it
+needs the Finance site added to its allow-list before it can read this workbook.
+Everything below is only for the case where you are registering a new app.
+
 ### What to ask IT for
 
 Send this — it's specific enough to action without a back-and-forth:
@@ -110,10 +136,23 @@ Send this — it's specific enough to action without a back-and-forth:
 
 ### Then configure
 
+Either form works. The URL form matches the 3PL dashboard:
+
 ```toml
 [workbook]
 mode = "sharepoint"
 
+AZURE_TENANT_ID     = "<Directory (tenant) ID>"
+AZURE_CLIENT_ID     = "<Application (client) ID>"
+AZURE_CLIENT_SECRET = "<the secret VALUE>"
+
+[files]
+GROUP_PL = "https://61nngljuq69wkvzlaiog9kkphca.sharepoint.com/sites/Finance/Shared Documents/Group PL/Group_PL_2026_Upload.xlsx"
+```
+
+Or address the file explicitly, which does not depend on a share link staying valid:
+
+```toml
 [sharepoint]
 tenant_id     = "<Directory (tenant) ID>"
 client_id     = "<Application (client) ID>"
@@ -153,6 +192,27 @@ print(check_connection(SharePointConfig.from_mapping(st.secrets['sharepoint'])))
 ```
 
 ---
+
+## Two deliberate differences from the 3PL dashboard's method
+
+Worth knowing if you are comparing the two implementations side by side.
+
+**1. Metadata is fetched before content.** The 3PL method calls
+`/shares/{token}/driveItem/content`, which returns the file's bytes and nothing
+else. This dashboard calls `/shares/{token}/driveItem` first to get the eTag,
+the last-modified time and who saved it — then downloads. That extra call is
+what makes the provenance banner possible.
+
+**2. The cache is keyed on the eTag, not a 5-minute TTL.** The 3PL doc lists
+*"data shown is stale even after Excel is edited — cache still valid (5 min
+TTL)"* as an expected pitfall, and its status line reports the last successful
+**fetch**, not the file's own modified time. On a cache hit that shows a recent
+timestamp over potentially older figures. For a dashboard reporting EBITDA to
+the board, that combination is the failure mode to design out, so here the cache
+key moves the instant the file is saved and the banner reports when the
+**workbook** was last written, by whom.
+
+Neither difference changes the Azure setup. The same credentials drive both.
 
 ## How refreshing actually works
 
