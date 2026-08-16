@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.streamlit/secrets.toml
+.venv/
+venv/
+.env
+*.xlsx
+!tests/fixtures/*.xlsx
+.DS_Store
+.vscode/
