@@ -163,3 +163,53 @@ def test_secret_never_appears_in_error_messages(monkeypatch):
     with pytest.raises(GraphError) as excinfo:
         gc._acquire_token(CONFIG)
     assert CONFIG.client_secret not in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# URL addressing (the /shares endpoint used by the existing dashboards)
+# ---------------------------------------------------------------------------
+
+URL_CONFIG = SharePointConfig.from_mapping({
+    "AZURE_TENANT_ID": "tid", "AZURE_CLIENT_ID": "cid", "AZURE_CLIENT_SECRET": "sec",
+    "GROUP_PL": "https://blitz.sharepoint.com/sites/Finance/Shared Documents/Group PL/Group_PL_2026_Upload.xlsx",
+})
+
+
+def test_url_mode_fetches_metadata_not_just_content(monkeypatch, fake_token):
+    """/driveItem, not /driveItem/content — the banner needs the eTag."""
+    seen: list[str] = []
+
+    def fake_get(url, token, **kwargs):
+        seen.append(url)
+        return FakeResponse(payload={
+            "name": "Group_PL_2026_Upload.xlsx", "id": "ITEM9", "size": 609772,
+            "eTag": 'W/"tag-9"', "lastModifiedDateTime": "2026-08-14T10:02:08Z",
+            "webUrl": "https://blitz.sharepoint.com/sites/Finance/x.xlsx",
+            "parentReference": {"driveId": "DRIVE9"},
+            "lastModifiedBy": {"user": {"displayName": "Fado Ganinduto"}},
+        })
+
+    monkeypatch.setattr(gc, "_get", fake_get)
+    remote = gc.locate_file(URL_CONFIG)
+
+    assert seen[0].startswith("https://graph.microsoft.com/v1.0/shares/u!")
+    assert seen[0].endswith("/driveItem"), "must not go straight to /content"
+    assert remote.etag == 'W/"tag-9"'
+    assert remote.modified_by == "Fado Ganinduto"
+    assert remote.drive_id == "DRIVE9"
+
+
+def test_url_mode_download_prefers_resolved_item_ids(monkeypatch, fake_token):
+    captured: list[str] = []
+    monkeypatch.setattr(gc, "_get", lambda url, t, **k: (captured.append(url), FakeResponse(content=b"xlsx"))[1])
+    remote = gc.RemoteFile("w.xlsx", "DRIVE9", "ITEM9", None, None, "e", "")
+    assert gc.download_file(URL_CONFIG, remote) == b"xlsx"
+    assert captured[0].endswith("/drives/DRIVE9/items/ITEM9/content")
+
+
+def test_url_mode_download_falls_back_to_shares_when_ids_missing(monkeypatch, fake_token):
+    captured: list[str] = []
+    monkeypatch.setattr(gc, "_get", lambda url, t, **k: (captured.append(url), FakeResponse(content=b"xlsx"))[1])
+    remote = gc.RemoteFile("w.xlsx", "", "", None, None, "e", "")
+    assert gc.download_file(URL_CONFIG, remote) == b"xlsx"
+    assert "/shares/u!" in captured[0] and captured[0].endswith("/driveItem/content")

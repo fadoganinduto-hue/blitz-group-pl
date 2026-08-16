@@ -203,3 +203,56 @@ def test_fingerprint_is_not_md5():
     """The fingerprint keys a process-global cache shared across sessions."""
     ref = UploadedWorkbook(_FakeUpload(b"abc")).describe()
     assert len(ref.fingerprint) == 64, "expected SHA-256, not MD5"
+
+
+# ---------------------------------------------------------------------------
+# Compatibility with the existing Blitz dashboards' secrets convention
+# ---------------------------------------------------------------------------
+
+def test_house_azure_naming_and_pasted_url_are_accepted():
+    """Same three secrets as the 3PL dashboard, plus a pasted SharePoint URL."""
+    secrets = FakeSecrets({
+        "workbook": {"mode": MODE_SHAREPOINT},
+        "AZURE_TENANT_ID": "tid",
+        "AZURE_CLIENT_ID": "cid",
+        "AZURE_CLIENT_SECRET": "sec",
+        "files": {
+            "GROUP_PL": "https://blitz.sharepoint.com/sites/Finance/Shared Documents/Group PL/Group_PL_2026_Upload.xlsx",
+        },
+    })
+    source, warning = build_source(secrets)
+    assert warning is None
+    assert source is not None
+    assert source.origin == "SharePoint"
+
+
+def test_share_token_matches_graph_shares_encoding():
+    """Graph expects 'u!' + base64url(url) with padding stripped."""
+    import base64
+    url = "https://blitz.sharepoint.com/sites/Finance/x.xlsx"
+    cfg = SharePointConfig.from_mapping({
+        "AZURE_TENANT_ID": "t", "AZURE_CLIENT_ID": "c",
+        "AZURE_CLIENT_SECRET": "s", "GROUP_PL": url,
+    })
+    assert cfg is not None and cfg.addresses_by_url
+    expected = "u!" + base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+    assert cfg.share_token == expected
+    assert "=" not in cfg.share_token
+
+
+def test_url_must_be_https():
+    assert SharePointConfig.from_mapping({
+        "AZURE_TENANT_ID": "t", "AZURE_CLIENT_ID": "c",
+        "AZURE_CLIENT_SECRET": "s", "file_url": "ftp://blitz/x.xlsx",
+    }) is None
+
+
+def test_explicit_path_config_still_works_alongside_url_support():
+    cfg = SharePointConfig.from_mapping({
+        "tenant_id": "t", "client_id": "c", "client_secret": "s",
+        "hostname": "blitz.sharepoint.com", "site_path": "sites/Finance/",
+        "file_path": "/Shared Documents/Group PL/x.xlsx",
+    })
+    assert cfg is not None
+    assert not cfg.addresses_by_url
+    assert cfg.site_path == "/sites/Finance"

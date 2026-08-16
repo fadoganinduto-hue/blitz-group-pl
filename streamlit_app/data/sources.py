@@ -254,11 +254,27 @@ def build_source(secrets: Any) -> tuple[Any | None, str | None]:
     mode = configured_mode(secrets)
 
     if mode == MODE_SHAREPOINT:
-        config = SharePointConfig.from_mapping(_section(secrets, "sharepoint"))
+        # Credentials may live in a [sharepoint] section or flat at the top
+        # level as AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET —
+        # the convention the other Blitz dashboards already use. Merge both so
+        # one set of secrets can serve every app.
+        merged: dict = {}
+        for key in ("AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"):
+            try:
+                if secrets.get(key):
+                    merged[key] = secrets[key]
+            except Exception:  # noqa: BLE001
+                pass
+        merged.update(_section(secrets, "files"))
+        merged.update(_section(secrets, "sharepoint"))
+        config = SharePointConfig.from_mapping(merged)
         if config is None:
             return None, (
-                "workbook.mode is 'sharepoint' but the [sharepoint] section in "
-                "secrets.toml is missing or incomplete. Falling back to manual upload."
+                "workbook.mode is 'sharepoint' but the credentials in secrets.toml "
+                "are missing or incomplete. Needs a tenant/client/secret (either "
+                "[sharepoint] keys or AZURE_TENANT_ID / AZURE_CLIENT_ID / "
+                "AZURE_CLIENT_SECRET) plus either file_url or "
+                "hostname+site_path+file_path. Falling back to manual upload."
             )
         return SharePointWorkbook(config), None
 

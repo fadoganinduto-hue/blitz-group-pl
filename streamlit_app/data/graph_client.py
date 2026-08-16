@@ -24,6 +24,7 @@ the "Shared Documents" segment as shown in the SharePoint web URL.
 
 from __future__ import annotations
 
+import base64
 import time
 import re
 from dataclasses import dataclass, field
@@ -55,38 +56,86 @@ class SharePointConfig:
     tenant_id: str
     client_id: str
     client_secret: str = field(repr=False)  # never let a debug print leak this
-    hostname: str
-    site_path: str
-    file_path: str
+    # Address the file EITHER by a pasted SharePoint URL (file_url) OR by
+    # hostname + site_path + file_path. The URL form matches the house
+    # convention used by the 3PL dashboard: copy the browser address bar or a
+    # "Copy link" share URL and paste it. The path form is more explicit and
+    # survives a share-link being revoked.
+    file_url: str = ""
+    hostname: str = ""
+    site_path: str = ""
+    file_path: str = ""
+
+    @property
+    def addresses_by_url(self) -> bool:
+        return bool(self.file_url)
 
     @property
     def web_url(self) -> str:
         """Best-effort browser URL, for showing provenance in the UI."""
+        if self.file_url:
+            return self.file_url
         return f"https://{self.hostname}{self.site_path}/{self.file_path}"
+
+    @property
+    def share_token(self) -> str:
+        """Graph's /shares addressing: base64url of the URL, prefixed 'u!'."""
+        encoded = base64.urlsafe_b64encode(self.file_url.encode()).decode().rstrip("=")
+        return f"u!{encoded}"
 
     @classmethod
     def from_mapping(cls, data: Any) -> "SharePointConfig | None":
-        """Build from a secrets mapping, or return None if incomplete."""
+        """Build from a secrets mapping, or return None if incomplete.
+
+        Accepts both the house naming used by the existing dashboards
+        (AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET, flat at the
+        top level) and the nested [sharepoint] form, so one set of credentials
+        can serve every Blitz Streamlit app.
+        """
         if not data:
             return None
-        required = (
-            "tenant_id", "client_id", "client_secret",
-            "hostname", "site_path", "file_path",
-        )
-        try:
-            values = {key: str(data[key]).strip() for key in required}
-        except (KeyError, TypeError):
+
+        def pick(*keys: str) -> str:
+            for key in keys:
+                try:
+                    value = data[key]
+                except (KeyError, TypeError):
+                    continue
+                if value:
+                    return str(value).strip()
+            return ""
+
+        creds = {
+            "tenant_id": pick("tenant_id", "AZURE_TENANT_ID"),
+            "client_id": pick("client_id", "AZURE_CLIENT_ID"),
+            "client_secret": pick("client_secret", "AZURE_CLIENT_SECRET"),
+        }
+        if any(not v or v.startswith("your-") for v in creds.values()):
             return None
-        if any(not v or v.startswith("your-") for v in values.values()):
+
+        file_url = pick("file_url", "url", "GROUP_PL", "FILE_URL")
+        if file_url:
+            if not file_url.lower().startswith("https://"):
+                return None
+            return cls(**creds, file_url=file_url)
+
+        hostname = pick("hostname")
+        site_path = pick("site_path")
+        file_path = pick("file_path")
+        if not (hostname and site_path and file_path):
+            return None
+        if any(v.startswith("your-") for v in (hostname, site_path, file_path)):
             return None
         # A malformed hostname cannot move the request off graph.microsoft.com,
         # but it can silently target the wrong SharePoint site.
-        if not re.fullmatch(r"[A-Za-z0-9.-]+", values["hostname"]):
+        if not re.fullmatch(r"[A-Za-z0-9.-]+", hostname):
             return None
-        # Normalise: site_path leading slash, file_path no leading slash.
-        values["site_path"] = "/" + values["site_path"].strip("/")
-        values["file_path"] = values["file_path"].lstrip("/")
-        return cls(**values)
+        return cls(
+            **creds,
+            hostname=hostname,
+            site_path="/" + site_path.strip("/"),
+            file_path=file_path.lstrip("/"),
+        )
 
 
 @dataclass
@@ -211,9 +260,11 @@ def _explain_graph_failure(response: requests.Response, what: str) -> str:
         return f"Not authorised reading {what}. The token was rejected — check the client secret."
     if response.status_code == 404:
         return (
-            f"Not found: {what}. Check hostname, site_path and file_path against "
-            "the SharePoint web URL. file_path is relative to the site and does "
-            "include the 'Shared Documents' segment."
+            f"Not found: {what}. If you configured file_url, re-copy it from the "
+            "browser address bar or the file's Copy-link menu. If you configured "
+            "hostname/site_path/file_path, check them against the SharePoint web "
+            "URL — file_path is relative to the site and does include the "
+            "'Shared Documents' segment."
         )
     return f"Graph error {response.status_code} reading {what}: {response.text[:200]}"
 
@@ -233,8 +284,49 @@ def _parse_timestamp(raw: Any) -> datetime | None:
         return None
 
 
+def _remote_from_item(item: dict, config: SharePointConfig) -> RemoteFile:
+    modified_by = None
+    try:
+        modified_by = item["lastModifiedBy"]["user"]["displayName"]
+    except (KeyError, TypeError):
+        pass
+    try:
+        size = int(item["size"]) if item.get("size") is not None else None
+    except (TypeError, ValueError):
+        size = None
+    return RemoteFile(
+        name=str(item.get("name", "workbook.xlsx")),
+        drive_id=str(item.get("parentReference", {}).get("driveId", "")),
+        item_id=str(item.get("id", "")),
+        last_modified=_parse_timestamp(item.get("lastModifiedDateTime")),
+        size=size,
+        # eTag changes on every save — the natural cache key.
+        etag=str(item.get("eTag") or item.get("cTag") or ""),
+        web_url=str(item.get("webUrl", config.web_url)),
+        modified_by=modified_by,
+    )
+
+
+def _locate_by_url(config: SharePointConfig) -> RemoteFile:
+    """Resolve a pasted SharePoint URL via Graph's /shares endpoint.
+
+    Note this fetches ``/driveItem`` (metadata), not ``/driveItem/content``.
+    The content endpoint returns bytes only, which would leave the provenance
+    banner with nothing to show and no eTag to key the cache on.
+    """
+    token = _acquire_token(config)
+    url = f"{GRAPH_ROOT}/shares/{config.share_token}/driveItem"
+    response = _get(url, token)
+    if response.status_code != 200:
+        raise GraphError(_explain_graph_failure(response, "the shared file URL"))
+    return _remote_from_item(_json(response, "file lookup"), config)
+
+
 def locate_file(config: SharePointConfig) -> RemoteFile:
-    """Resolve the configured site + path to a concrete drive item."""
+    """Resolve the configured file to a concrete drive item."""
+    if config.addresses_by_url:
+        return _locate_by_url(config)
+
     token = _acquire_token(config)
 
     site_url = f"{GRAPH_ROOT}/sites/{config.hostname}:{quote(config.site_path, safe='/')}"
@@ -266,35 +358,16 @@ def locate_file(config: SharePointConfig) -> RemoteFile:
             _explain_graph_failure(item_response, f"file '{config.file_path}'")
         )
 
-    item = _json(item_response, "file lookup")
-    modified_by = None
-    try:
-        modified_by = item["lastModifiedBy"]["user"]["displayName"]
-    except (KeyError, TypeError):
-        pass
-
-    try:
-        size = int(item["size"]) if item.get("size") is not None else None
-    except (TypeError, ValueError):
-        size = None
-
-    return RemoteFile(
-        name=str(item.get("name", "workbook.xlsx")),
-        drive_id=str(item.get("parentReference", {}).get("driveId", "")),
-        item_id=str(item.get("id", "")),
-        last_modified=_parse_timestamp(item.get("lastModifiedDateTime")),
-        size=size,
-        # eTag changes on every save — the natural cache key.
-        etag=str(item.get("eTag") or item.get("cTag") or ""),
-        web_url=str(item.get("webUrl", config.web_url)),
-        modified_by=modified_by,
-    )
+    return _remote_from_item(_json(item_response, "file lookup"), config)
 
 
 def download_file(config: SharePointConfig, remote: RemoteFile) -> bytes:
     """Download the workbook's bytes."""
     token = _acquire_token(config)
-    url = f"{GRAPH_ROOT}/drives/{remote.drive_id}/items/{remote.item_id}/content"
+    if remote.drive_id and remote.item_id:
+        url = f"{GRAPH_ROOT}/drives/{remote.drive_id}/items/{remote.item_id}/content"
+    else:  # fall back to shares addressing when the item ids are unavailable
+        url = f"{GRAPH_ROOT}/shares/{config.share_token}/driveItem/content"
     response = _get(url, token, allow_redirects=True)
     if response.status_code != 200:
         raise GraphError(_explain_graph_failure(response, f"contents of '{remote.name}'"))
