@@ -85,16 +85,35 @@ class TestOptionalSheets:
     def test_missing_optional_sheet_is_warning_not_error(self, valid_sheets):
         from streamlit_app.data.validator import validate_workbook
 
-        # Remove TIE-OUT CHECK (optional) from the valid sheets
-        sheets = {k: v for k, v in valid_sheets.items() if k != "TIE-OUT CHECK"}
+        # Blitz Summary is optional: absence should inform, not block.
+        sheets = {k: v for k, v in valid_sheets.items() if k != "Blitz Summary"}
         file_mock = _make_file_mock()
         issues = validate_workbook(file_mock, sheets)
 
         errors = [i for i in issues if i.level == "error"]
-        warnings = [i for i in issues if i.level == "warning" and "TIE-OUT CHECK" in i.title]
+        warnings = [i for i in issues if i.level == "warning" and "Blitz Summary" in i.title]
 
         assert errors == [], "Missing optional sheet must NOT produce an error"
         assert warnings, "Missing optional sheet must produce a warning"
+
+    def test_retired_sheets_are_not_flagged_when_absent(self, valid_sheets):
+        """TIE-OUT CHECK and WIP Margin by Stream are no longer used.
+
+        Warning about sheets the dashboard has stopped reading trains people to
+        ignore the warnings that matter.
+        """
+        from streamlit_app.data.validator import validate_workbook
+
+        sheets = {
+            k: v for k, v in valid_sheets.items()
+            if k not in {"TIE-OUT CHECK", "WIP Margin by Stream"}
+        }
+        issues = validate_workbook(_make_file_mock(), sheets)
+        retired = [
+            i for i in issues
+            if "TIE-OUT" in i.title or "WIP Margin" in i.title
+        ]
+        assert retired == [], f"retired sheets should not be reported: {retired}"
 
     def test_all_optional_sheets_absent_produces_warnings_only(self, consolidated_raw, master_raw):
         from streamlit_app.data.validator import validate_workbook

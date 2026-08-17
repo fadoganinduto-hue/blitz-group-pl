@@ -43,8 +43,6 @@ _REQUIRED_SHEETS: list[str] = [
 
 # Optional sheets — missing these is only a warning
 _OPTIONAL_SHEETS: list[str] = [
-    "TIE-OUT CHECK",
-    "WIP Margin by Stream",
     "Blitz Summary",
     "Borzo Summary",
     "TheLorry Summary",

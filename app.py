@@ -58,7 +58,6 @@ from streamlit_app.tabs import (
     ai_insights,
     consolidated,
     data_health,
-    margin_by_stream,
     overview,
     per_client,
     per_entity,
@@ -172,7 +171,7 @@ if uploaded_file is None and workbook_bytes is None:
                 line-height:1.7;margin:0 0 28px 0;">
                 Upload the <strong style="color:{BLITZ_COLORS['text_primary']};">
                 Group_PL_2026_Upload…xlsx</strong> workbook in the sidebar to load
-                consolidated P&amp;L, per-entity, per-client, margin, and data health views.
+                consolidated P&amp;L, per-entity, per-client, and data health views.
             </p>
             <div style="
                 display:inline-flex;align-items:center;gap:8px;
@@ -388,13 +387,17 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Tab routing — logical order with intentional labels
 # ---------------------------------------------------------------------------
-tab_overview, tab_cons, tab_entity, tab_client, tab_margin, tab_health, tab_ai = st.tabs(
+# Margin by Stream is intentionally not registered. The "WIP Margin by Stream"
+# worksheet allocates no cost to any stream (so every margin reads 100%) and its
+# columns are labelled 2026 while holding 2024 figures. The sheet is being
+# reworked; the parser and its regression tests remain so the tab can be
+# restored in one line once it is fixed.
+tab_overview, tab_cons, tab_entity, tab_client, tab_health, tab_ai = st.tabs(
     [
         ":material/home: Overview",
         ":material/bar_chart: Consolidated P&L",
         ":material/compare: Entity Analysis",
         ":material/group: Client Revenue",
-        ":material/donut_small: Margin by Stream",
         ":material/shield_with_heart: Data Health",
         ":material/auto_awesome: AI Insights",
     ],
@@ -417,10 +420,6 @@ if tab_entity.open:
 if tab_client.open:
     with tab_client:
         per_client.render(sheets)
-
-if tab_margin.open:
-    with tab_margin:
-        margin_by_stream.render(sheets)
 
 if tab_health.open:
     with tab_health:

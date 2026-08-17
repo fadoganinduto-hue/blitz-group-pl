@@ -174,18 +174,10 @@ def prepare_data_context(
             stream_rev = master.groupby("Rev Stream")["Amount (IDR)"].sum().sort_values(ascending=False)
             context_data["client_concentration"]["by_stream"] = {st: float(val) for st, val in stream_rev.head(8).items()}
 
-    # ── 4. Data quality (TIE-OUT CHECK) ──────────────────────────────────
-    raw_tie = sheets.get("TIE-OUT CHECK")
-    if raw_tie is not None:
-        tie = parse_tie_out(raw_tie)
-        if not tie.empty:
-            flagged = tie[tie["Delta"].abs() > 1_000_000]
-            context_data["data_health"]["total_rows"] = len(tie)
-            context_data["data_health"]["flagged_rows"] = len(flagged)
-            context_data["data_health"]["largest_discrepancies"] = [
-                {"Label": row['Label'], "Month": row['Month'], "Delta": float(row['Delta'])}
-                for _, row in flagged.nlargest(5, "Delta").iterrows()
-            ]
+    # Section 4 previously summarised the TIE-OUT CHECK sheet. That sheet is
+    # being retired, and reconciliation context now comes from the derived
+    # MASTER-vs-P&L bridge instead of a hand-maintained worksheet.
+
 
     return json.dumps(context_data, indent=2)
 

@@ -1,14 +1,17 @@
-"""Independent reconciliation checks computed from the workbook itself.
+"""Reconciliation checks computed from the workbook itself.
 
-The TIE-OUT CHECK sheet is maintained by hand and can lag the P&L. These checks
-are derived directly from the parsed data, so they cannot go stale:
+These replace the hand-maintained TIE-OUT CHECK sheet, which is being retired.
+Both are derived from the parsed data on every load, so neither can go stale:
 
-* ``master_vs_pl_bridge`` — per-client MASTER revenue vs the Consolidated P&L
-  Total Gross Revenue, per month. This is the number the team tracks manually
-  and it did not previously appear anywhere in the dashboard.
-* ``coverage_gaps`` — months the P&L has closed but MASTER or TIE-OUT has not
-  caught up on. Silent coverage gaps are how an unreconciled month gets reported
-  as "healthy".
+* ``master_vs_pl_bridge`` — per-client MASTER revenue against Consolidated
+  Total Gross Revenue, month by month. The number the team tracks by hand.
+* ``coverage_gaps`` — months the P&L has closed that a downstream source has
+  not reached. Silent coverage gaps are how an unreconciled month gets reported
+  as healthy.
+
+The two are deliberately separate. A month covered by only one source cannot be
+reconciled at all, and treating that as a variance produces figures that are
+both enormous and meaningless.
 """
 
 from __future__ import annotations
@@ -31,14 +34,18 @@ def master_vs_pl_bridge(
 ) -> pd.DataFrame:
     """Return per-month MASTER vs Consolidated P&L revenue with the variance.
 
-    Columns: Month, MonthDate, MasterRevenue, PLRevenue, Delta, AbsDelta, PctOfPL.
+    Columns: Month, MonthDate, MasterRevenue, PLRevenue, Delta, AbsDelta,
+    PctOfPL, Comparable.
+
     Months present in only one source are still returned, with the missing side
-    as NaN, so a coverage gap shows up rather than silently reconciling to zero.
+    as NaN, so a coverage gap shows up rather than silently reconciling to zero
+    — but they are marked ``Comparable = False`` and carry a NaN Delta. Callers
+    reporting variance totals must filter on ``Comparable``.
     """
     empty = pd.DataFrame(
         columns=[
             "Month", "MonthDate", "MasterRevenue", "PLRevenue",
-            "Delta", "AbsDelta", "PctOfPL",
+            "Delta", "AbsDelta", "PctOfPL", "Comparable",
         ]
     )
     if master is None or master.empty or cons_long is None or cons_long.empty:
@@ -65,7 +72,18 @@ def master_vs_pl_bridge(
     if months is not None:
         bridge = bridge[bridge["Month"].isin(months)]
 
+    # A month can only be reconciled when BOTH sources cover it and the P&L has
+    # closed it. Months present in one source alone are COVERAGE gaps, not
+    # variances — scoring them as variances turned 18 months that MASTER simply
+    # does not reach into billion-rupiah breaks and reported Rp32B "gross
+    # unreconciled" against a true Rp348M. They are reported by coverage_gaps().
+    bridge["Comparable"] = (
+        bridge["MasterRevenue"].notna()
+        & bridge["PLRevenue"].notna()
+        & (bridge["PLRevenue"] != 0)
+    )
     bridge["Delta"] = bridge["MasterRevenue"].fillna(0) - bridge["PLRevenue"].fillna(0)
+    bridge.loc[~bridge["Comparable"], "Delta"] = float("nan")
     bridge["AbsDelta"] = bridge["Delta"].abs()
     bridge["PctOfPL"] = bridge.apply(
         lambda r: (r["Delta"] / r["PLRevenue"]) if r.get("PLRevenue") else float("nan"),
@@ -94,9 +112,13 @@ class CoverageGap:
 def coverage_gaps(
     actual_pl_months: list[str],
     master: pd.DataFrame | None,
-    tie_out: pd.DataFrame | None,
+    tie_out: pd.DataFrame | None = None,
 ) -> list[CoverageGap]:
-    """Return closed P&L months that MASTER or TIE-OUT does not cover."""
+    """Return closed P&L months that a downstream source does not cover.
+
+    ``tie_out`` is retained so an alternative reconciliation source can be
+    passed later; the retired TIE-OUT CHECK sheet is no longer supplied.
+    """
     gaps: list[CoverageGap] = []
     if not actual_pl_months:
         return gaps
