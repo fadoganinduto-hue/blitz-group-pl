@@ -258,19 +258,28 @@ def build_source(secrets: Any) -> tuple[Any | None, str | None]:
         # level as AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET —
         # the convention the other Blitz dashboards already use. Merge both so
         # one set of secrets can serve every app.
+        # Precedence, lowest to highest. Order matters: a credential left
+        # behind under [workbook] must NEVER override the one written in the
+        # documented top-level position, or editing the file in the right place
+        # appears to have no effect and the app authenticates with a stale
+        # secret while every diagnostic reads the new one.
         merged: dict = {}
+
+        # 1. [workbook] — only reached via the TOML trap where bare AZURE_*
+        #    keys written below the header become workbook.AZURE_*. Accepted so
+        #    the app still works, but the weakest source.
+        merged.update(_section(secrets, "workbook"))
+
+        # 2. Top level — the documented place, per the house convention.
         for key in ("AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"):
             try:
                 if secrets.get(key):
                     merged[key] = secrets[key]
             except Exception:  # noqa: BLE001
                 pass
-        # TOML assigns a bare key to whichever [section] precedes it, so
-        # AZURE_* lines written below [workbook] silently become
-        # workbook.AZURE_*. That is a config-file trap, not a user error —
-        # accept the credentials from there too rather than reporting the
-        # secrets as "missing" when they are plainly in the file.
-        merged.update(_section(secrets, "workbook"))
+
+        # 3. [files] for the workbook URL, then 4. [sharepoint] as the most
+        #    explicit configuration available.
         merged.update(_section(secrets, "files"))
         merged.update(_section(secrets, "sharepoint"))
         config = SharePointConfig.from_mapping(merged)

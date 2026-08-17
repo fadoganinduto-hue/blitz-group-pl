@@ -286,3 +286,43 @@ def test_workbook_path_is_never_mistaken_for_a_sharepoint_url():
         "mode": "sharepoint", "path": "/Users/me/Group_PL.xlsx",
     })
     assert cfg is None, "a local path must not be accepted as a SharePoint URL"
+
+
+def test_top_level_credentials_beat_a_leftover_copy_under_workbook():
+    """Editing the documented position must actually take effect.
+
+    Reordering secrets.toml commonly leaves the old AZURE_* lines under
+    [workbook]. If those won, the app would authenticate with a stale secret
+    while every diagnostic — which reads top-level first — reported the new
+    one. That combination is close to undebuggable.
+    """
+    secrets = FakeSecrets({
+        "AZURE_TENANT_ID": "tid",
+        "AZURE_CLIENT_ID": "cid",
+        "AZURE_CLIENT_SECRET": "NEW-secret",
+        "workbook": {
+            "mode": MODE_SHAREPOINT,
+            "AZURE_TENANT_ID": "tid",
+            "AZURE_CLIENT_ID": "cid",
+            "AZURE_CLIENT_SECRET": "OLD-stale-secret",
+        },
+        "files": {"GROUP_PL": "https://blitz.sharepoint.com/sites/Finance/x.xlsx"},
+    })
+    source, warning = build_source(secrets)
+    assert warning is None
+    assert source._config.client_secret == "NEW-secret"
+
+
+def test_sharepoint_section_is_the_most_explicit_source():
+    secrets = FakeSecrets({
+        "AZURE_CLIENT_SECRET": "top-level",
+        "workbook": {"mode": MODE_SHAREPOINT},
+        "sharepoint": {
+            "tenant_id": "t", "client_id": "c", "client_secret": "explicit",
+            "hostname": "blitz.sharepoint.com", "site_path": "/sites/Finance",
+            "file_path": "Shared Documents/x.xlsx",
+        },
+    })
+    source, warning = build_source(secrets)
+    assert warning is None
+    assert source._config.client_secret == "explicit"
