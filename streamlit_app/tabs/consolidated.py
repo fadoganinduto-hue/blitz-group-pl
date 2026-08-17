@@ -933,7 +933,11 @@ def _render_revenue_margin_combo(
 ) -> None:
     """Dual-axis combo: Revenue bars (left) + Gross Margin % line (right)."""
     import plotly.graph_objects as go
-    from streamlit_app.components.charts import _apply_base_layout, _apply_xaxis_months
+    from streamlit_app.components.charts import (
+        _apply_base_layout,
+        _apply_financial_axis,
+        _apply_xaxis_months,
+    )
 
     currency = get_active_currency()
     st.markdown(
@@ -977,8 +981,6 @@ def _render_revenue_margin_combo(
     fig.update_layout(
         yaxis=dict(
             title=f"Revenue ({currency})",
-            tickprefix="" if currency == "USD" else "Rp",
-            tickformat="~s",
             showgrid=True,
             gridcolor="rgba(226,226,226,0.5)",
         ),
@@ -994,6 +996,8 @@ def _render_revenue_margin_combo(
         showlegend=True,
         hovermode="x unified",
     )
+    # Revenue bars only; the margin line rides y2 and is excluded there.
+    _apply_financial_axis(fig, axis="y")
     month_labels = cat_orders.get("Month", months)
     _apply_xaxis_months(fig, len(month_labels), month_labels)
     render_plotly_chart(fig)

@@ -89,21 +89,209 @@ def _fmt_converted(value: float) -> str:
             return f"{sign}{prefix}{abs_val / divisor:,.1f}{suffix}"
     return f"{sign}{prefix}{abs_val:,.0f}"
 
-def _apply_financial_axis(fig: go.Figure) -> None:
-    """Use compact IDR ticks while retaining exact values in hover details."""
-    fig.update_yaxes(tickprefix=_get_prefix(), tickformat="~s")
+# ---------------------------------------------------------------------------
+# Financial value axis
+#
+# Plotly's tickformat="~s" is D3's SI notation, which labels 10^9 as "G" (giga).
+# Every other number in this dashboard — KPI cards, tables, waterfall labels,
+# hover text — comes from fmt_idr and says "B". An axis reading "Rp2.5G" beside
+# a card reading "Rp2.5B" is the same figure in two dialects, and a reader who
+# does not know SI prefixes has no way to tell that "G" means billion at all.
+#
+# D3 has no billion format, so the ticks are placed and labelled here instead:
+# nice round steps, one shared unit for the whole axis, text from the same
+# thresholds fmt_idr uses. Hover still carries the exact rupiah.
+# ---------------------------------------------------------------------------
+
+_TICK_TARGET = 6  # aim for roughly this many gridlines
 
 
-def _guard_category_labels(fig: go.Figure, n_categories: int) -> None:
+def _nice_step(rough: float) -> float:
+    """Round a raw step up to the nearest 1 / 2 / 2.5 / 5 × 10^k."""
+    import math
+
+    if not rough or rough <= 0 or not math.isfinite(rough):
+        return 0.0
+    exponent = math.floor(math.log10(rough))
+    magnitude = 10.0**exponent
+    base = rough / magnitude
+    for candidate in (1.0, 2.0, 2.5, 5.0, 10.0):
+        if base <= candidate * 1.0000001:
+            return candidate * magnitude
+    return 10.0 * magnitude
+
+
+def _numeric(values) -> list[float]:
+    import math
+
+    if values is None:
+        return []
+    out: list[float] = []
+    # Plotly hands back numpy arrays; `values or []` would raise on those.
+    for v in values:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(f):
+            out.append(f)
+    return out
+
+
+def _value_axis_extent(fig: go.Figure, axis: str) -> tuple[float, float] | None:
+    """Return (min, max) of everything plotted against the given value axis.
+
+    Waterfall traces are handled specially: their ``y`` entries are deltas, so
+    the axis extent is the running total, not the raw values.
+    """
+    anchor = "y" if axis == "y" else "x"
+    seen: list[float] = []
+
+    for trace in fig.data:
+        if getattr(trace, "type", "") == "waterfall":
+            ys = _numeric(getattr(trace, "y", None))
+            measures = list(getattr(trace, "measure", None) or [])
+            running = 0.0
+            for i, y in enumerate(ys):
+                measure = measures[i] if i < len(measures) else "relative"
+                if measure == "absolute":
+                    running = y
+                elif measure != "total":
+                    running += y
+                seen.append(running)
+            continue
+
+        # Ignore anything riding a secondary axis (e.g. the Pareto cumulative
+        # % line on y2) — it is not measured in currency.
+        if getattr(trace, anchor + "axis", None) not in (None, anchor):
+            continue
+        seen.extend(_numeric(getattr(trace, anchor, None)))
+
+    if not seen:
+        return None
+    return min(seen), max(seen)
+
+
+def _tick_unit(largest: float) -> tuple[float, str]:
+    """Pick one divisor/suffix for the whole axis, matching fmt_idr."""
+    from streamlit_app.constants import IDR_SUFFIX_THRESHOLDS
+
+    for threshold, suffix, divisor in IDR_SUFFIX_THRESHOLDS:
+        if largest >= threshold:
+            return divisor, suffix
+    return 1.0, ""
+
+
+def _coarser_step(step: float) -> float:
+    """Return the next nice step up (…1 → 2 → 2.5 → 5 → 10…)."""
+    import math
+
+    if step <= 0:
+        return 0.0
+    exponent = math.floor(math.log10(step))
+    magnitude = 10.0**exponent
+    base = round(step / magnitude, 6)
+    ladder = (1.0, 2.0, 2.5, 5.0)
+    for candidate in ladder:
+        if base < candidate - 1e-9:
+            return candidate * magnitude
+    return 10.0 * magnitude
+
+
+def _decimals_for(step: float, divisor: float) -> int:
+    """Fewest decimals (0–2) that render the step exactly in its unit."""
+    scaled = step / divisor
+    for places in (0, 1, 2):
+        shifted = scaled * (10**places)
+        if abs(shifted - round(shifted)) < 1e-9:
+            return places
+    return 2
+
+
+def _financial_ticks(lo: float, hi: float, prefix: str) -> tuple[list[float], list[str]]:
+    """Return (tickvals, ticktext) for a currency axis spanning lo..hi."""
+    import math
+
+    # Charts here are baselined at zero (bars literally, lines by convention),
+    # so the tick lattice must include it.
+    lo, hi = min(0.0, lo), max(0.0, hi)
+    span = hi - lo
+    if span <= 0:
+        return [0.0], [f"{prefix}0"]
+
+    step = _nice_step(span / _TICK_TARGET)
+    if step <= 0:
+        return [], []
+
+    # A 250M step under a 1.5B ceiling would label the gridlines "Rp0.25B".
+    # Widening the step to 500M costs two gridlines and buys "Rp0.5B / Rp1.0B".
+    divisor, suffix = 1.0, ""
+    decimals = 0
+    for _ in range(3):
+        largest = max(abs(math.floor(lo / step)), abs(math.ceil(hi / step))) * step
+        divisor, suffix = _tick_unit(largest or step)
+        decimals = _decimals_for(step, divisor)
+        if decimals <= 1:
+            break
+        step = _coarser_step(step)
+
+    first = math.floor(lo / step)
+    last = math.ceil(hi / step)
+    if last - first > 40:  # pathological range; let Plotly cope
+        return [], []
+
+    vals = [round(i * step, 6) for i in range(first, last + 1)]
+    text: list[str] = []
+    for v in vals:
+        if v == 0:
+            text.append(f"{prefix}0")
+            continue
+        # Fixed decimals across the axis — a ragged "Rp0.5B / Rp1B / Rp1.5B"
+        # column is harder to scan than "Rp0.5B / Rp1.0B / Rp1.5B".
+        body = f"{abs(v) / divisor:,.{decimals}f}"
+        text.append(f"{'-' if v < 0 else ''}{prefix}{body}{suffix}")
+    return vals, text
+
+
+def _apply_financial_axis(fig: go.Figure, axis: str = "y") -> None:
+    """Label the value axis in the dashboard's own units (B / M / K, not G).
+
+    Falls back to Plotly's SI ticks only when the figure carries no numeric
+    data to measure — an empty chart, where no label is rendered anyway.
+    """
+    prefix = _get_prefix()
+    update = fig.update_yaxes if axis == "y" else fig.update_xaxes
+
+    extent = _value_axis_extent(fig, axis)
+    if extent is None:
+        update(tickprefix=prefix, tickformat="~s")
+        return
+
+    vals, text = _financial_ticks(extent[0], extent[1], prefix)
+    if not vals:
+        update(tickprefix=prefix, tickformat="~s")
+        return
+
+    # tickprefix is carried in the text, so it must not be applied twice.
+    update(tickprefix="", tickmode="array", tickvals=vals, ticktext=text)
+
+
+def _guard_category_labels(fig: go.Figure, n_categories: int, axis: str = "x") -> None:
     """Stop long category names being cropped by a fixed plot height.
 
-    Client and industry names run long, and the x-axis band was being squeezed
+    Client and industry names run long, and the category band was being squeezed
     until labels rendered as "ce" / "als" / "ics". Let the axis claim the room
     it needs, and angle the labels once there are enough of them to collide.
     """
-    fig.update_xaxes(automargin=True, tickangle=-35 if n_categories > 6 else 0)
-    fig.update_yaxes(automargin=True)
-    fig.update_layout(margin=dict(b=90 if n_categories > 6 else 60))
+    if axis == "x":
+        fig.update_xaxes(automargin=True, tickangle=-35 if n_categories > 6 else 0)
+        fig.update_yaxes(automargin=True)
+        fig.update_layout(margin=dict(b=90 if n_categories > 6 else 60))
+    else:
+        # Horizontal bars: names sit on y and need width, not rotation.
+        fig.update_yaxes(automargin=True, tickangle=0)
+        fig.update_xaxes(automargin=True)
+        fig.update_layout(margin=dict(l=150, b=60))
 
 
 def _apply_base_layout(fig: go.Figure, title: str = "") -> go.Figure:
@@ -335,39 +523,56 @@ def comparison_bar_chart(
     barmode: str = "group",
     y_format: str = "idr",
 ) -> go.Figure:
-    """Return a grouped or stacked bar chart with rich tooltips."""
+    """Return a grouped or stacked bar chart with rich tooltips.
+
+    Orientation follows the data: a numeric ``y`` puts values on the vertical
+    axis, a numeric ``x`` (with categorical ``y``) gives horizontal bars. The
+    currency axis and the label-crowding guard follow the same detection, so a
+    horizontal chart does not end up with "Rp" stamped on its client names.
+    """
+    horizontal = (
+        pd.api.types.is_numeric_dtype(df[x])
+        and not pd.api.types.is_numeric_dtype(df[y])
+    )
+    value_axis = "x" if horizontal else "y"
+    cat_axis = "y" if horizontal else "x"
+
     fig = px.bar(
         df,
         x=x,
         y=y,
         color=color,
         barmode=barmode,
+        orientation="h" if horizontal else "v",
         color_discrete_map=_resolved_color_map(df, color, color_map),
         color_discrete_sequence=PLOTLY_COLOR_SEQUENCE,
     )
+    cat_token = f"%{{{cat_axis}}}"
+    val_token = f"%{{{value_axis}}}"
+    if y_format == "pct":
+        value_part = f"Value: {val_token[:-1]}:.1%}}"
+    else:
+        value_part = f"Value: {_get_prefix()}{val_token[:-1]}:,.0f}}"
     hover = (
-        "<b>%{fullData.name}</b><br>%{x}<br>Value: %{y:.1%}<extra></extra>"
-        if y_format == "pct" and color else
-        "<b>%{x}</b><br>Value: %{y:.1%}<extra></extra>"
-        if y_format == "pct" else
-        f"<b>%{{fullData.name}}</b><br>%{{x}}<br>Value: {_get_prefix()}%{{y:,.0f}}<extra></extra>"
+        f"<b>%{{fullData.name}}</b><br>{cat_token}<br>{value_part}<extra></extra>"
         if color else
-        f"<b>%{{x}}</b><br>Value: {_get_prefix()}%{{y:,.0f}}<extra></extra>"
+        f"<b>{cat_token}</b><br>{value_part}<extra></extra>"
     )
     fig.update_traces(hovertemplate=hover, marker_line_width=0, opacity=0.92)
     _apply_base_layout(fig, title)
     if y_format == "pct":
-        fig.update_yaxes(tickformat=".0%")
+        (fig.update_xaxes if horizontal else fig.update_yaxes)(tickformat=".0%")
     else:
-        _apply_financial_axis(fig)
+        _apply_financial_axis(fig, axis=value_axis)
     fig.update_layout(showlegend=bool(color))
 
-    # Adaptive month x-axis (no category_orders on this builder; count from data)
-    n_categories = df[x].nunique()
-    _apply_xaxis_months(fig, n_categories)
-    # Client, industry and stream names are long; without this the axis band is
+    n_categories = df[y].nunique() if horizontal else df[x].nunique()
+    if not horizontal:
+        # Adaptive month x-axis (no category_orders on this builder)
+        _apply_xaxis_months(fig, n_categories)
+    # Client, industry and stream names are long; without this the label band is
     # squeezed until labels render as "ce" / "als" / "ics".
-    _guard_category_labels(fig, n_categories)
+    _guard_category_labels(fig, n_categories, axis=cat_axis)
     return fig
 
 
@@ -716,7 +921,7 @@ def variance_bar_chart(
         height=max(200, len(labels) * 50),
     )
     fig.update_yaxes(tickfont=dict(size=11))
-    fig.update_xaxes(tickprefix=_get_prefix(), tickformat="~s")
+    _apply_financial_axis(fig, axis="x")
     return fig
 
 
