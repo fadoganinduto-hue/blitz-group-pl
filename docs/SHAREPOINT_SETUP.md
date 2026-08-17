@@ -73,12 +73,55 @@ source** picks it up. No export, no upload.
 This is what you'll need once the dashboard runs on a server, where there's no
 OneDrive client and nobody signed in. The app authenticates as itself.
 
-### First: you may already have this
+### First: check whether you already have this
 
 The Blitz 3PL dashboard already reads SharePoint through an Azure AD app
-registration. If that app was granted `Files.Read.All` (tenant-wide read), it
-already covers the Finance site — **no new Azure work is needed.** Take the same
-three values from that app's Streamlit secrets:
+registration. If that app has tenant-wide read, it already covers the Finance
+site and **no new Azure work is needed.**
+
+Find out without needing Azure Portal access — Azure stamps the granted
+permissions into every token it issues, and the diagnostic reads them back:
+
+```bash
+export AZURE_CLIENT_SECRET='<the 3PL dashboard secret>'
+
+python3 scripts/check_sharepoint_access.py \
+  --tenant-id "<3PL tenant id>" \
+  --client-id "<3PL client id>" \
+  --url "https://61nngljuq69wkvzlaiog9kkphca.sharepoint.com/sites/Finance/Shared Documents/Group PL/Group_PL_2026_Upload.xlsx"
+```
+
+It prints the app's permissions and whether it can actually read the workbook:
+
+```
+2. Granted application permissions
+   app: Blitz Ops Dashboard — SharePoint Reader
+   • Files.Read.All — tenant-wide read of every file
+
+3. Reading the workbook
+   ✓ Group_PL_2026_Upload.xlsx
+   modified 14 Aug 2026 10:02 UTC by Fado Ganinduto  ·  0.6 MB
+   ✓ Downloaded 609,772 bytes, valid .xlsx
+
+Verdict
+   Works. These credentials can read the workbook via Files.Read.All.
+   Reuse them for the Group P&L dashboard — no new Azure work needed.
+```
+
+Pass the secret through an environment variable, not a command-line argument —
+arguments end up in shell history and in `ps` output.
+
+**Reading the result:**
+
+| What it says | What to do |
+|---|---|
+| `Files.Read.All` or `Sites.Read.All`, workbook reads OK | Reuse the credentials. Done — skip the rest of this section. |
+| `Sites.Selected`, workbook reads OK | Reuse them. Already least-privilege; nothing to change. |
+| `Sites.Selected`, read fails | Ask IT to add `/sites/Finance` to that app's allow-list. One Graph call, no new app. |
+| No permissions in the token | Admin consent was never granted, or the permission is Delegated not Application. |
+| Any `ReadWrite` or `FullControl` scope | It works, but flag it — a read-only dashboard should not be able to modify the P&L. |
+
+If it works, take the same three values from that app's Streamlit secrets:
 
 ```toml
 [workbook]
