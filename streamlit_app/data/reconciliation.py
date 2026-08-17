@@ -133,6 +133,55 @@ def coverage_gaps(
     return gaps
 
 
+def summary_vs_detail(
+    summary_frames: dict[str, pd.DataFrame],
+    detail_frames: dict[str, pd.DataFrame],
+    metric: str = PL_REVENUE_METRIC,
+    *,
+    materiality: float = BRIDGE_MATERIALITY_IDR,
+) -> pd.DataFrame:
+    """Where the Summary and Detail sheets disagree on the same figure.
+
+    The Entity tab lets the reader toggle granularity, and the two sheets are
+    meant to be two views of one truth. They are not always: on the current
+    workbook Blitz Jun 2026 revenue is Rp3,661,974,619 on Summary and
+    Rp2,968,578,119 on Detail — a Rp693M swing that follows a toggle nobody
+    would expect to change a number.
+
+    Returns Entity, Month, MonthDate, Summary, Detail, Delta for every
+    disagreement above materiality.
+    """
+    rows: list[dict] = []
+    for entity, summary in (summary_frames or {}).items():
+        detail = (detail_frames or {}).get(entity)
+        if summary is None or detail is None or summary.empty or detail.empty:
+            continue
+        s_vals = (
+            summary[summary["Metric"] == metric]
+            .groupby(["Month", "MonthDate"], as_index=False)["Value"].sum()
+        )
+        d_vals = (
+            detail[detail["Metric"] == metric]
+            .groupby(["Month", "MonthDate"], as_index=False)["Value"].sum()
+        )
+        merged = s_vals.merge(
+            d_vals, on=["Month", "MonthDate"], how="inner",
+            suffixes=("_summary", "_detail"),
+        )
+        for _, r in merged.iterrows():
+            delta = float(r["Value_summary"]) - float(r["Value_detail"])
+            if abs(delta) > materiality:
+                rows.append({
+                    "Entity": entity, "Month": r["Month"], "MonthDate": r["MonthDate"],
+                    "Summary": float(r["Value_summary"]),
+                    "Detail": float(r["Value_detail"]), "Delta": delta,
+                })
+    if not rows:
+        return pd.DataFrame(columns=["Entity","Month","MonthDate","Summary","Detail","Delta"])
+    return pd.DataFrame(rows).sort_values(
+        ["MonthDate", "Entity"]).reset_index(drop=True)
+
+
 def unreconciled_summary(
     deltas: pd.DataFrame,
     threshold: float,

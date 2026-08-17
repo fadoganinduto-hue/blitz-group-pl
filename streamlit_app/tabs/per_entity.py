@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 import traceback
 
+from html import escape
+
 import pandas as pd
 import streamlit as st
 
@@ -43,6 +45,9 @@ def render(sheets: dict[str, pd.DataFrame]) -> None:
         "Compare each operating entity’s revenue, profit contribution, momentum, and margin profile.",
         eyebrow="Performance drivers",
     )
+
+    # A granularity toggle must not change a reported number without saying so.
+    _warn_if_granularity_changes_revenue(sheets)
     # ── Granularity toggle (Summary / Detail) ─────────────────────────
     col_gran, _ = st.columns([1, 3])
     with col_gran:
@@ -156,7 +161,7 @@ def render(sheets: dict[str, pd.DataFrame]) -> None:
     st.markdown(
         f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
         f"letter-spacing:0.06em;text-transform:uppercase;margin:12px 0 8px;'>"
-        f":material/leaderboard: Entity Ranking — {latest_month}</div>",
+        f"Entity Ranking — {latest_month}</div>",
         unsafe_allow_html=True,
     )
     _render_ranking_table(entity_long, latest_month, prior_month)
@@ -200,7 +205,7 @@ def _render_entity_trend(
     st.markdown(
         f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
         f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;'>"
-        f":material/show_chart: Which entity drives performance?</div>",
+        f"Which entity drives performance?</div>",
         unsafe_allow_html=True,
     )
     metric_df = vis[vis["Metric"] == metric].copy()
@@ -233,7 +238,7 @@ def _render_entity_bar(
     st.markdown(
         f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
         f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;'>"
-        f":material/bar_chart: Entity Snapshot — {latest_month}</div>",
+        f"Entity Snapshot — {latest_month}</div>",
         unsafe_allow_html=True,
     )
     bar_df = pd.DataFrame(vis[(vis["Metric"] == metric) & (vis["Month"] == latest_month)])
@@ -258,7 +263,7 @@ def _render_small_multiples(vis: pd.DataFrame, cat_orders: dict) -> None:
     st.markdown(
         f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
         f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;'>"
-        f":material/grid_view: Multi-KPI Trend — 6 Key Metrics</div>",
+        f"Multi-KPI Trend — 6 Key Metrics</div>",
         unsafe_allow_html=True,
     )
     candidates = [m for m in PREFERRED_TREND_METRICS if m in vis["Metric"].unique()][:4]
@@ -323,7 +328,7 @@ def _render_entity_comparison(
     st.markdown(
         f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
         f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:10px;'>"
-        f":material/compare: Entity Performance Summary — {latest_month}</div>",
+        f"Entity Performance Summary — {latest_month}</div>",
         unsafe_allow_html=True,
     )
 
@@ -459,3 +464,53 @@ def _render_entity_comparison(
         unsafe_allow_html=True,
     )
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+
+def _warn_if_granularity_changes_revenue(sheets: dict) -> None:
+    """Flag entity-months where the Summary and Detail sheets disagree.
+
+    The two are meant to be two views of one truth. On the current workbook
+    Blitz Jun 2026 revenue is Rp3.66B on Summary and Rp2.97B on Detail, so the
+    Granularity toggle silently moves the number by Rp693M. Whichever view is
+    open, the reader should know the other one disagrees.
+    """
+    from streamlit_app.data.reconciliation import summary_vs_detail
+    from streamlit_app.constants import ENTITY_DETAIL_SHEETS, ENTITY_SUMMARY_SHEETS
+
+    def frames(mapping):
+        out = {}
+        for entity, sheet_name in mapping.items():
+            raw = sheets.get(sheet_name)
+            if raw is not None:
+                parsed = parse_pl_sheet(raw, entity)
+                if not parsed.empty:
+                    out[entity] = parsed
+        return out
+
+    try:
+        clashes = summary_vs_detail(frames(ENTITY_SUMMARY_SHEETS), frames(ENTITY_DETAIL_SHEETS))
+    except Exception:  # noqa: BLE001 — never let a check break the tab
+        return
+    if clashes.empty:
+        return
+
+    worst = clashes.iloc[clashes["Delta"].abs().argmax()]
+    st.markdown(
+        f"""
+        <div style='background:#FFF8C5;border:1px solid #BF8700;border-left:4px solid #BF8700;
+            border-radius:8px;padding:11px 16px;margin:2px 0 14px 0;'>
+          <div style='font-size:12px;font-weight:700;color:#7A5C00;'>
+            Summary and Detail disagree on revenue in
+            {len(clashes)} entity-month{'s' if len(clashes) != 1 else ''}</div>
+          <div style='font-size:11px;color:#7A5C00;line-height:1.6;margin-top:3px;'>
+            Largest: <b>{escape(str(worst['Entity']))} {escape(str(worst['Month']))}</b> —
+            {fmt_idr(float(worst['Summary']))} on Summary vs
+            {fmt_idr(float(worst['Detail']))} on Detail
+            ({fmt_idr(abs(float(worst['Delta'])))} apart). The Granularity toggle
+            above therefore changes this figure. Both come from the workbook;
+            reconciling them is a change to the source, not to this dashboard.
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )

@@ -94,6 +94,18 @@ def _apply_financial_axis(fig: go.Figure) -> None:
     fig.update_yaxes(tickprefix=_get_prefix(), tickformat="~s")
 
 
+def _guard_category_labels(fig: go.Figure, n_categories: int) -> None:
+    """Stop long category names being cropped by a fixed plot height.
+
+    Client and industry names run long, and the x-axis band was being squeezed
+    until labels rendered as "ce" / "als" / "ics". Let the axis claim the room
+    it needs, and angle the labels once there are enough of them to collide.
+    """
+    fig.update_xaxes(automargin=True, tickangle=-35 if n_categories > 6 else 0)
+    fig.update_yaxes(automargin=True)
+    fig.update_layout(margin=dict(b=90 if n_categories > 6 else 60))
+
+
 def _apply_base_layout(fig: go.Figure, title: str = "") -> go.Figure:
     """Apply consistent responsive layout to any Plotly figure.
 
@@ -351,8 +363,11 @@ def comparison_bar_chart(
     fig.update_layout(showlegend=bool(color))
 
     # Adaptive month x-axis (no category_orders on this builder; count from data)
-    n_months = df[x].nunique()
-    _apply_xaxis_months(fig, n_months)
+    n_categories = df[x].nunique()
+    _apply_xaxis_months(fig, n_categories)
+    # Client, industry and stream names are long; without this the axis band is
+    # squeezed until labels render as "ce" / "als" / "ics".
+    _guard_category_labels(fig, n_categories)
     return fig
 
 

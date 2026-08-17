@@ -105,3 +105,58 @@ def test_tie_out_source_is_optional():
     """The retired sheet is simply not passed; the call must still work."""
     gaps = coverage_gaps(["Jul 2026"], _master([("Jun 2026", "2026-06-01", 1.0)]))
     assert [g.source for g in gaps] == ["Client breakdown (MASTER)"]
+
+
+# ---------------------------------------------------------------------------
+# Summary vs Detail — the granularity toggle must not change a number silently
+# ---------------------------------------------------------------------------
+
+def _pl(entity, rows):
+    return pd.DataFrame([
+        {"Entity": entity, "Metric": "Total Gross Revenue", "Month": m,
+         "MonthDate": pd.Timestamp(d), "Value": v}
+        for m, d, v in rows
+    ])
+
+
+def test_summary_and_detail_disagreement_is_reported():
+    from streamlit_app.data.reconciliation import summary_vs_detail
+
+    out = summary_vs_detail(
+        {"Blitz": _pl("Blitz", [("Jun 2026", "2026-06-01", 3_661_974_619)])},
+        {"Blitz": _pl("Blitz", [("Jun 2026", "2026-06-01", 2_968_578_119)])},
+    )
+    assert len(out) == 1
+    assert out.iloc[0]["Delta"] == pytest.approx(693_396_500)
+    assert out.iloc[0]["Entity"] == "Blitz"
+
+
+def test_agreeing_months_are_not_reported():
+    from streamlit_app.data.reconciliation import summary_vs_detail
+
+    out = summary_vs_detail(
+        {"Borzo": _pl("Borzo", [("Jun 2026", "2026-06-01", 1_143_733_236)])},
+        {"Borzo": _pl("Borzo", [("Jun 2026", "2026-06-01", 1_143_733_236)])},
+    )
+    assert out.empty
+
+
+def test_rounding_is_not_a_disagreement():
+    from streamlit_app.data.reconciliation import summary_vs_detail
+
+    out = summary_vs_detail(
+        {"Blitz": _pl("Blitz", [("Jun 2026", "2026-06-01", 1_000_000_000)])},
+        {"Blitz": _pl("Blitz", [("Jun 2026", "2026-06-01", 1_000_000_500)])},
+    )
+    assert out.empty, "sub-materiality differences are not disagreements"
+
+
+def test_month_absent_from_one_granularity_is_skipped():
+    """An inner join: a month only one sheet covers is not a disagreement."""
+    from streamlit_app.data.reconciliation import summary_vs_detail
+
+    out = summary_vs_detail(
+        {"Blitz": _pl("Blitz", [("Jul 2026", "2026-07-01", 5_000_000_000)])},
+        {"Blitz": _pl("Blitz", [("Jun 2026", "2026-06-01", 1_000_000_000)])},
+    )
+    assert out.empty

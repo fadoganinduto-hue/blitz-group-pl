@@ -296,3 +296,41 @@ def test_margin_rows_are_not_filed_as_costs(sheets) -> None:
     parsed = parse_wip_margin(sheets["WIP Margin by Stream"])
     assert "3PL Deliveries Margin" in set(parsed["margin"]["Stream"])
     assert "3PL Deliveries Margin" not in set(parsed["cogs"]["Stream"])
+
+
+# ---------------------------------------------------------------------------
+# Detail sheets — aliasing, and where they disagree with Summary
+# ---------------------------------------------------------------------------
+
+def test_detail_sheets_expose_revenue_under_the_canonical_name(sheets) -> None:
+    """Without aliasing the Entity tab's Detail view shows N/A for revenue."""
+    detail = parse_pl_sheet(sheets["Blitz Detail"], "Blitz")
+    metrics = set(detail["Metric"])
+    assert "Total Gross Revenue" in metrics
+    assert "Total REVENUE" not in metrics, "raw Detail label leaked through"
+    value = detail[
+        (detail["Metric"] == "Total Gross Revenue") & (detail["Month"] == "Apr 2026")
+    ]["Value"].sum()
+    assert value == pytest.approx(2_560_844_299, abs=TOL)
+
+
+def test_blitz_summary_and_detail_disagree_on_revenue(sheets) -> None:
+    """A real workbook inconsistency, pinned so it cannot pass unnoticed.
+
+    Toggling granularity on the Entity tab changes Blitz Jun 2026 revenue by
+    Rp693M. If this test starts failing, the sheets have been reconciled.
+    """
+    from streamlit_app.data.reconciliation import summary_vs_detail
+
+    summaries = {e: parse_pl_sheet(sheets[f"{e} Summary"], e)
+                 for e in ("Blitz", "Borzo", "TheLorry")}
+    details = {e: parse_pl_sheet(sheets[f"{e} Detail"], e)
+               for e in ("Blitz", "Borzo", "TheLorry")}
+    out = summary_vs_detail(summaries, details)
+
+    assert not out.empty
+    assert set(out["Entity"]) == {"Blitz"}, "only Blitz should disagree"
+    jun = out[out["Month"] == "Jun 2026"].iloc[0]
+    assert jun["Summary"] == pytest.approx(3_661_974_619, abs=TOL)
+    assert jun["Detail"] == pytest.approx(2_968_578_119, abs=TOL)
+    assert jun["Delta"] == pytest.approx(693_396_500, abs=TOL)

@@ -118,6 +118,15 @@ METRIC_SECTIONS: dict[str, list[str]] = {
     ],
 }
 
+# The Detail sheets name the same lines differently from the Summary sheets.
+# Left unmapped, the Entity tab's Detail view finds no revenue at all and every
+# revenue cell renders "N/A" while the profit lines populate normally.
+DETAIL_METRIC_ALIASES: dict[str, str] = {
+    "Total REVENUE": "Total Gross Revenue",
+    "Total NET REVENUE": "Net Revenue",
+    "Total COGS ": "Total COGS",
+}
+
 # ---------------------------------------------------------------------------
 # P&L bridge (waterfall)
 # ---------------------------------------------------------------------------
@@ -198,11 +207,27 @@ BLITZ_COLORS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Colour palette
 # ---------------------------------------------------------------------------
+# Entity series colours — validated, not chosen by eye.
+#
+# The previous three (#00B9F2 / #018EDD / #004EA9) were three shades of the same
+# blue: Blitz and Borzo sat ΔE 11.8 apart in NORMAL vision, below the 15 floor,
+# so they were hard to tell apart even without a colour-vision deficiency, and
+# #00B9F2 had only 2.22:1 contrast against a white chart surface. That is a large
+# part of why the charts were hard to read.
+#
+# These pass all six checks in light AND dark mode (lightness band, chroma floor,
+# CVD separation, normal-vision floor, contrast). Borzo orange and TheLorry teal
+# are the values the team's own Power BI guide already specified.
+#
+#   node scripts/validate_palette.js "#0284C7,#E0592B,#0F9D8F" --mode light
+#
+# NB: #00B9F2 remains the brand colour for UI chrome (buttons, accent bars). It
+# is simply not usable as a data-series fill.
 ENTITY_COLORS: dict[str, str] = {
-    "Blitz": "#00B9F2",       # primary Blitz blue
-    "Borzo": "#018EDD",       # secondary blue
-    "TheLorry": "#004EA9",    # deep blue
-    "Consolidated": "#1A1A1A", # dark text
+    "Blitz": "#0284C7",        # blue — brand family, with real contrast
+    "Borzo": "#E0592B",        # orange
+    "TheLorry": "#0F9D8F",     # teal
+    "Consolidated": "#334155",  # slate — a total, deliberately not a hue
 }
 
 METRIC_COLOR_FAMILIES: dict[str, str] = {
@@ -240,12 +265,24 @@ METRIC_COLORS: dict[str, str] = {
 
 # Matches chartCategoricalColors in config.toml. Light tones remain reserved for
 # surfaces, so every plotted category remains legible on a white background.
+# Categorical sequence, assigned in this fixed order and never cycled.
+#
+# The previous sequence put two greys (#1A1A1A, #4D4D4D) in slots 4 and 5 — text
+# tokens used as series fills, which read as gray and failed the chroma floor —
+# behind three near-identical blues. Validated:
+#
+#   node scripts/validate_palette.js \
+#     "#0284C7,#E0592B,#0F9D8F,#7C3AED,#65A30D,#DB2777" --mode light
+#   → all six checks PASS, light and dark
+#
+# A seventh category is NOT a generated hue: fold the tail into "Other" or facet.
 PLOTLY_COLOR_SEQUENCE: list[str] = [
-    "#00B9F2",  # primary Blitz blue
-    "#018EDD",  # secondary blue
-    "#004EA9",  # deep blue
-    "#1A1A1A",  # primary text
-    "#4D4D4D",  # secondary text
+    "#0284C7",  # blue
+    "#E0592B",  # orange
+    "#0F9D8F",  # teal
+    "#7C3AED",  # violet
+    "#65A30D",  # olive
+    "#DB2777",  # magenta
 ]
 
 # ---------------------------------------------------------------------------

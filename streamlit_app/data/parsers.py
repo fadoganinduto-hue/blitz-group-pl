@@ -9,6 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from streamlit_app.constants import (
+    DETAIL_METRIC_ALIASES,
     RATIO_LABELS,
     SKIP_LABELS,
     USD_BLOCK_MARKER,
@@ -153,6 +154,8 @@ def parse_pl_sheet(raw: pd.DataFrame, entity: str) -> pd.DataFrame:
             continue
 
         label = _disambiguate_depreciation(label_raw.strip(), current_section)
+        # Detail sheets use their own names for the shared subtotals.
+        label = DETAIL_METRIC_ALIASES.get(label, label)
 
         for col_idx in month_col_indices:
             val = raw.iloc[row_idx, col_idx]

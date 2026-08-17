@@ -393,7 +393,7 @@ def render_section_header(title: str, icon: str, summary: str | None = None) -> 
                 border-radius: 2px;
                 flex-shrink: 0;
             "></span>
-            :material/{icon}: {escape(title)}
+            {escape(title)}
           </div>
           {f'<div style="font-size:11px;color:{BLITZ_COLORS["text_secondary"]};margin-top:2px;margin-left:9px;">{escape(summary)}</div>' if summary else ''}
         </div>
@@ -694,7 +694,6 @@ def render_insight_card(title: str, icon: str = "lightbulb") -> "Generator[None,
             margin-bottom: 16px;
         ">
             <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
-                <span style="font-size: 16px; color: {BLITZ_COLORS['primary']};">:material/{icon}:</span>
                 <span style="font-size: 13px; font-weight: 700; color: {BLITZ_COLORS['deep_blue']};">{escape(title)}</span>
             </div>
             <div style="font-size: 13px; color: {BLITZ_COLORS['text_primary']}; line-height: 1.5;">

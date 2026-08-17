@@ -228,7 +228,7 @@ def _render_derived_checks(
     st.markdown(
         f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
         f"letter-spacing:0.07em;text-transform:uppercase;margin:6px 0 10px;'>"
-        f":material/rule: Client detail vs Group P&amp;L</div>",
+        f"Client detail vs Group P&amp;L</div>",
         unsafe_allow_html=True,
     )
 
@@ -308,7 +308,7 @@ def _render_data_quality(sheets: dict[str, pd.DataFrame]) -> None:
     st.markdown(
         f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
         f"letter-spacing:0.07em;text-transform:uppercase;margin:22px 0 10px;'>"
-        f":material/health_metrics: Data Quality Indicators</div>",
+        f"Data Quality Indicators</div>",
         unsafe_allow_html=True,
     )
 

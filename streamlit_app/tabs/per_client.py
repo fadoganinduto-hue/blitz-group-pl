@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from html import escape
+
 import pandas as pd
 import streamlit as st
 
@@ -101,6 +103,9 @@ def render(sheets: dict[str, pd.DataFrame]) -> None:
     with col_tree:
         _render_treemap(filtered)
 
+    # ── Client revenue per entity ────────────────────────────────────────
+    _render_clients_by_entity(filtered)
+
     # ── Industry & Rev Stream (side by side) ─────────────────────────────
     col_ind, col_stream = st.columns(2, gap="medium")
     with col_ind:
@@ -180,7 +185,7 @@ def _render_top_clients(filtered: pd.DataFrame) -> None:
     st.markdown(
         f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
         f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;'>"
-        f":material/bar_chart: Top Clients Driving Revenue</div>",
+        f"Top Clients Driving Revenue</div>",
         unsafe_allow_html=True,
     )
     top15 = pd.DataFrame(
@@ -200,7 +205,7 @@ def _render_treemap(filtered: pd.DataFrame) -> None:
     st.markdown(
         f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
         f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;'>"
-        f":material/account_tree: Revenue Composition — Entity → Stream → Client</div>",
+        f"Revenue Composition — Entity → Stream → Client</div>",
         unsafe_allow_html=True,
     )
     treemap_df = pd.DataFrame(
@@ -275,7 +280,7 @@ def _render_churn_analysis(
     filtered_months: list[str],
 ) -> None:
     """Show clients who are new or churned vs 3 months prior to the latest selected month."""
-    st.markdown("##### :material/compare_arrows: Movement (vs 3 months prior)")
+    st.markdown("##### Movement (vs 3 months prior)")
     if not filtered_months:
         return
     # Only compare against a CLOSED month. Using the last filtered month made
@@ -323,7 +328,7 @@ def _render_churn_analysis(
 
 def _render_pareto(filtered: pd.DataFrame) -> None:
     """Render an 80/20 Pareto chart: client bars + cumulative revenue % line."""
-    st.markdown("##### :material/bar_chart: Pareto — Client revenue (80/20)")
+    st.markdown("##### Pareto — Client revenue (80/20)")
     client_rev = (
         filtered.groupby("Client (clean)")["Amount (IDR)"]
         .sum()
@@ -350,7 +355,7 @@ def _render_industry_breakdown(filtered: pd.DataFrame) -> None:
     st.markdown(
         f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
         f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;'>"
-        f":material/category: Revenue by Industry</div>",
+        f"Revenue by Industry</div>",
         unsafe_allow_html=True,
     )
     ind_rev = pd.DataFrame(
@@ -369,7 +374,7 @@ def _render_stream_breakdown(filtered: pd.DataFrame) -> None:
     st.markdown(
         f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
         f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;'>"
-        f":material/donut_small: Revenue by Stream</div>",
+        f"Revenue by Stream</div>",
         unsafe_allow_html=True,
     )
     stream_rev = pd.DataFrame(
@@ -378,6 +383,12 @@ def _render_stream_breakdown(filtered: pd.DataFrame) -> None:
     )
     if stream_rev.empty:
         st.caption("No stream data in the selected filters.")
+        return
+    if len(stream_rev) == 1:
+        # A one-bar bar chart is not a chart. The number is the chart.
+        row = stream_rev.iloc[0]
+        st.metric(str(row["Rev Stream"]), fmt_idr(float(row["Amount (IDR)"])))
+        st.caption("Only one revenue stream matches the current filters.")
         return
     fig = comparison_bar_chart(stream_rev, x="Rev Stream", y="Amount (IDR)", title="")
     render_plotly_chart(fig)
@@ -388,7 +399,7 @@ def _render_tiered_concentration(filtered: pd.DataFrame) -> None:
     st.markdown(
         f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
         f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:10px;'>"
-        f":material/groups: Client Concentration by Tier</div>",
+        f"Client Concentration by Tier</div>",
         unsafe_allow_html=True,
     )
     if filtered.empty:
@@ -464,7 +475,7 @@ def _render_driver_analysis(
     st.markdown(
         f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
         f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:10px;'>"
-        f":material/trending_up: Revenue Driver Analysis</div>",
+        f"Revenue Driver Analysis</div>",
         unsafe_allow_html=True,
     )
     if latest is None or prior is None:
@@ -640,3 +651,94 @@ def _render_driver_analysis(
             f"padding:6px 10px;'>{i_html}</div>",
             unsafe_allow_html=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# Client revenue per entity
+# ---------------------------------------------------------------------------
+
+def _render_clients_by_entity(filtered: pd.DataFrame) -> None:
+    """Who each entity's clients are, and how concentrated each book is.
+
+    Group-level top-client charts are dominated by Blitz, which is most of the
+    revenue — so Borzo's and TheLorry's books are invisible in them. Small
+    multiples keep every entity legible at its own scale, which a single stacked
+    chart cannot do when one series is an order of magnitude larger.
+    """
+    st.markdown(
+        f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
+        f"letter-spacing:0.06em;text-transform:uppercase;margin:18px 0 6px;'>"
+        f"Client Revenue by Entity</div>",
+        unsafe_allow_html=True,
+    )
+
+    if filtered.empty or "Entity" not in filtered.columns:
+        st.caption("No client data in the current filters.")
+        return
+
+    by_entity = (
+        filtered.groupby("Entity", as_index=False)["Amount (IDR)"]
+        .sum()
+        .sort_values("Amount (IDR)", ascending=False)
+    )
+    by_entity = by_entity[by_entity["Amount (IDR)"] != 0]
+    if by_entity.empty:
+        st.caption("No client revenue in the current filters.")
+        return
+
+    grand_total = float(by_entity["Amount (IDR)"].sum())
+    TOP_N = 8
+
+    columns = st.columns(len(by_entity), gap="medium")
+    for column, (_, entity_row) in zip(columns, by_entity.iterrows()):
+        entity = str(entity_row["Entity"])
+        entity_total = float(entity_row["Amount (IDR)"])
+        rows = filtered[filtered["Entity"] == entity]
+        clients = (
+            rows.groupby("Client (clean)", as_index=False)["Amount (IDR)"]
+            .sum()
+            .sort_values("Amount (IDR)", ascending=False)
+        )
+        clients = clients[clients["Amount (IDR)"] != 0]
+
+        with column:
+            share = entity_total / grand_total if grand_total else 0.0
+            top1 = float(clients["Amount (IDR)"].iloc[0]) if not clients.empty else 0.0
+            accent = ENTITY_COLORS.get(entity, BLITZ_COLORS["text_secondary"])
+            st.markdown(
+                f"<div style='border-left:3px solid {accent};padding-left:10px;margin-bottom:8px;'>"
+                f"<div style='font-size:14px;font-weight:800;"
+                f"color:{BLITZ_COLORS['text_primary']};'>{escape(entity)}</div>"
+                f"<div style='font-size:11px;color:{BLITZ_COLORS['text_secondary']};'>"
+                f"{fmt_idr(entity_total)} · {share:.0%} of client revenue · "
+                f"{len(clients)} client{'s' if len(clients) != 1 else ''}</div>"
+                f"<div style='font-size:11px;color:{BLITZ_COLORS['text_secondary']};'>"
+                f"top client {(top1 / entity_total if entity_total else 0):.0%} of this entity</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+            if clients.empty:
+                st.caption("No client detail for this entity.")
+                continue
+
+            # Fold the tail rather than drawing an unreadable long tail.
+            shown = clients.head(TOP_N).copy()
+            tail = clients.iloc[TOP_N:]
+            if not tail.empty:
+                shown = pd.concat([shown, pd.DataFrame([{
+                    "Client (clean)": f"Other ({len(tail)})",
+                    "Amount (IDR)": float(tail["Amount (IDR)"].sum()),
+                }])], ignore_index=True)
+
+            fig = comparison_bar_chart(
+                shown.sort_values("Amount (IDR)"),
+                x="Amount (IDR)", y="Client (clean)", title="",
+            )
+            # One entity per panel, so one colour — a value ramp here would
+            # double-encode bar length as hue and say nothing new.
+            fig.update_traces(marker_color=accent, orientation="h")
+            fig.update_layout(height=max(200, 34 * len(shown)), showlegend=False)
+            fig.update_xaxes(title="")
+            fig.update_yaxes(title="", automargin=True)
+            render_plotly_chart(fig)
