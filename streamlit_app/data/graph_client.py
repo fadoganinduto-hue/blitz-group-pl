@@ -113,6 +113,8 @@ class SharePointConfig:
         if any(not v or v.startswith("your-") for v in creds.values()):
             return None
 
+        # NB: deliberately not "path" or "mode" — those belong to [workbook]
+        # and must never be mistaken for a SharePoint URL.
         file_url = pick("file_url", "url", "GROUP_PL", "FILE_URL")
         if file_url:
             if not file_url.lower().startswith("https://"):

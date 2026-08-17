@@ -256,3 +256,33 @@ def test_explicit_path_config_still_works_alongside_url_support():
     assert cfg is not None
     assert not cfg.addresses_by_url
     assert cfg.site_path == "/sites/Finance"
+
+
+def test_credentials_below_workbook_header_are_still_found():
+    """TOML puts bare keys in the preceding [section].
+
+    Credentials written under [workbook] become workbook.AZURE_* rather than
+    top-level keys. That is a config-file trap, and reporting "credentials
+    missing" when they are visibly present in the file is unhelpful.
+    """
+    secrets = FakeSecrets({
+        "workbook": {
+            "mode": MODE_SHAREPOINT,
+            "AZURE_TENANT_ID": "tid",
+            "AZURE_CLIENT_ID": "cid",
+            "AZURE_CLIENT_SECRET": "sec",
+        },
+        "files": {"GROUP_PL": "https://blitz.sharepoint.com/sites/Finance/x.xlsx"},
+    })
+    source, warning = build_source(secrets)
+    assert warning is None, warning
+    assert source is not None and source.origin == "SharePoint"
+
+
+def test_workbook_path_is_never_mistaken_for_a_sharepoint_url():
+    """[workbook].path is a local filesystem path, not a file URL."""
+    cfg = SharePointConfig.from_mapping({
+        "AZURE_TENANT_ID": "t", "AZURE_CLIENT_ID": "c", "AZURE_CLIENT_SECRET": "s",
+        "mode": "sharepoint", "path": "/Users/me/Group_PL.xlsx",
+    })
+    assert cfg is None, "a local path must not be accepted as a SharePoint URL"

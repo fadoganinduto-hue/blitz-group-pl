@@ -265,6 +265,12 @@ def build_source(secrets: Any) -> tuple[Any | None, str | None]:
                     merged[key] = secrets[key]
             except Exception:  # noqa: BLE001
                 pass
+        # TOML assigns a bare key to whichever [section] precedes it, so
+        # AZURE_* lines written below [workbook] silently become
+        # workbook.AZURE_*. That is a config-file trap, not a user error —
+        # accept the credentials from there too rather than reporting the
+        # secrets as "missing" when they are plainly in the file.
+        merged.update(_section(secrets, "workbook"))
         merged.update(_section(secrets, "files"))
         merged.update(_section(secrets, "sharepoint"))
         config = SharePointConfig.from_mapping(merged)

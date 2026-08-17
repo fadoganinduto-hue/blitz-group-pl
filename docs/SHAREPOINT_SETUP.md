@@ -124,16 +124,21 @@ arguments end up in shell history and in `ps` output.
 If it works, take the same three values from that app's Streamlit secrets:
 
 ```toml
-[workbook]
-mode = "sharepoint"
-
 AZURE_TENANT_ID     = "<same as the 3PL dashboard>"
 AZURE_CLIENT_ID     = "<same as the 3PL dashboard>"
 AZURE_CLIENT_SECRET = "<same as the 3PL dashboard>"
 
+[workbook]
+mode = "sharepoint"
+
 [files]
 GROUP_PL = "https://61nngljuq69wkvzlaiog9kkphca.sharepoint.com/sites/Finance/Shared Documents/Group PL/Group_PL_2026_Upload.xlsx"
 ```
+
+**Key order matters.** In TOML a bare key belongs to whichever `[section]`
+precedes it, so the three `AZURE_*` lines must sit ABOVE `[workbook]` — written
+below it they silently become `workbook.AZURE_*`. The app now reads them from
+either place, but the order above is the correct one.
 
 Paste the URL straight from the browser address bar or the file's **⋯ → Copy
 link** menu — both work. That is the whole setup.
@@ -182,12 +187,12 @@ Send this — it's specific enough to action without a back-and-forth:
 Either form works. The URL form matches the 3PL dashboard:
 
 ```toml
-[workbook]
-mode = "sharepoint"
-
 AZURE_TENANT_ID     = "<Directory (tenant) ID>"
 AZURE_CLIENT_ID     = "<Application (client) ID>"
 AZURE_CLIENT_SECRET = "<the secret VALUE>"
+
+[workbook]
+mode = "sharepoint"
 
 [files]
 GROUP_PL = "https://61nngljuq69wkvzlaiog9kkphca.sharepoint.com/sites/Finance/Shared Documents/Group PL/Group_PL_2026_Upload.xlsx"
@@ -223,6 +228,7 @@ error on screen first. The usual ones:
 | "Tenant not found" | `tenant_id` is wrong, or is from a different app registration than `client_id`. |
 | "No workbook at /Users/…" (local mode) | Path typo, or OneDrive hasn't downloaded the file — see the Files On-Demand note above. |
 | "kept changing while being read" | Someone is saving the workbook right now. Click Refresh again. |
+| "credentials … missing or incomplete" although they are clearly in the file | Almost always TOML key order — the `AZURE_*` lines must be ABOVE `[workbook]`. |
 
 To test the connection without launching the whole app:
 
