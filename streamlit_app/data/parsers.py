@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
+
 import pandas as pd
 import streamlit as st
 
@@ -286,84 +289,163 @@ def parse_master(raw: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
 # WIP Margin by Stream sheet
 # ---------------------------------------------------------------------------
 
+# Section headers on the sheet are lettered: "A.  REVENUE BY STREAM",
+# "B.  COST OF REVENUE BY STREAM", "C.  GROSS MARGIN BY STREAM",
+# "D.  CHECK vs GROUP TOTALS". Keying on the letter is exact; the previous
+# implementation guessed from keywords and mis-filed rows — "3PL Deliveries
+# Margin" matched "cogs" before it matched "margin", so a margin line was
+# reported as a cost.
+_WIP_SECTIONS: dict[str, str] = {
+    "a": "revenue",
+    "b": "cogs",
+    "c": "margin",
+    "d": "check",
+}
+
+_WIP_TOTAL_LABELS: frozenset[str] = frozenset(
+    {"total revenue", "total cost of revenue", "total gross margin"}
+)
+
+
+@dataclass(frozen=True)
+class WipMarginQuality:
+    """Whether the WIP Margin sheet is fit to report from.
+
+    The sheet is named WIP for a reason. Both conditions below are true of the
+    workbook as it stands, and either one makes every margin on it meaningless:
+    rendering them anyway would put "3PL Deliveries margin: 100%" on screen with
+    the authority of a dashboard behind it.
+    """
+
+    costs_allocated: bool
+    unallocated_cost: float
+    period_mismatch: dict[str, tuple[float, float]]  # month -> (sheet, expected)
+
+    @property
+    def usable(self) -> bool:
+        return self.costs_allocated and not self.period_mismatch
+
+
 @st.cache_data(show_spinner=False, max_entries=12)
 def parse_wip_margin(raw: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """Parse the WIP Margin by Stream sheet into section DataFrames keyed by section name.
+    """Parse the WIP Margin by Stream sheet into section DataFrames.
 
-    Returns a dict with keys like 'revenue', 'cogs', 'margin' depending on what's found.
+    Keys: 'revenue', 'cogs', 'margin', 'check'. Ratio rows ("margin %") are
+    excluded — they are derived, and on this sheet they are derived from an
+    empty cost section.
     """
-    # Months are on row 4 (index 3), data starts at row 7 (index 6)
     try:
-        header_row_idx = 3  # row 4, 0-indexed
-        header = raw.iloc[header_row_idx]
-
-        # Collect month column indices
+        header_row_idx = None
         month_col_indices: list[int] = []
         month_labels: list[str] = []
-        for col_idx in range(1, len(raw.columns)):
-            val = header.iloc[col_idx]
-            ts = month_sort_key(str(val).strip()) if isinstance(val, str) else (
-                pd.Timestamp(val) if hasattr(val, "strftime") else pd.NaT
-            )
-            if ts is not pd.NaT:
-                month_col_indices.append(col_idx)
-                month_labels.append(
-                    val.strftime("%b %Y") if hasattr(val, "strftime") else str(val).strip()
-                )
+        for candidate in range(min(8, len(raw))):
+            cols, labels = [], []
+            for col_idx in range(1, len(raw.columns)):
+                val = raw.iloc[candidate, col_idx]
+                if hasattr(val, "strftime"):
+                    cols.append(col_idx)
+                    labels.append(val.strftime("%b %Y"))
+                elif isinstance(val, str) and month_sort_key(val.strip()) is not pd.NaT:
+                    cols.append(col_idx)
+                    # Canonicalise to "%b %Y". This sheet writes "Jan-26" while
+                    # the P&L sheets write "Jan 2026"; leaving them raw makes
+                    # every cross-check join match zero rows and pass
+                    # vacuously — the same trap the MASTER sheet sprang.
+                    labels.append(month_sort_key(val.strip()).strftime("%b %Y"))
+            if len(cols) >= 3:
+                header_row_idx, month_col_indices, month_labels = candidate, cols, labels
+                break
 
-        if not month_col_indices:
+        if header_row_idx is None:
             return {}
 
-        # Scan all rows from row 5 onward (index 4) to discover sections
         sections: dict[str, list[dict]] = {}
-        current_section = "revenue"
+        current: str | None = None
 
-        for row_idx in range(4, len(raw)):
-            label_raw = raw.iloc[row_idx, 0]
+        for row_idx in range(header_row_idx + 1, len(raw)):
+            label_raw = raw.iloc[row_idx, 1]
             if not isinstance(label_raw, str):
-                label_raw = raw.iloc[row_idx, 1] if len(raw.columns) > 1 else ""
+                label_raw = raw.iloc[row_idx, 0] if len(raw.columns) else ""
             if not isinstance(label_raw, str) or not label_raw.strip():
                 continue
+            label = label_raw.strip()
 
-            label_lower = label_raw.strip().lower()
-
-            # Detect section headers
-            if "revenue" in label_lower and "total" not in label_lower:
-                current_section = "revenue"
+            # "A.  REVENUE BY STREAM (from entity Detail sheets)"
+            marker = re.match(r"^([A-Da-d])\s*\.", label)
+            if marker:
+                current = _WIP_SECTIONS.get(marker.group(1).lower())
                 continue
-            if "cogs" in label_lower or "cost of" in label_lower:
-                current_section = "cogs"
-                continue
-            if "margin" in label_lower and "%" in label_lower:
-                current_section = "margin"
-                continue
-            if "gross profit" in label_lower:
-                current_section = "gross_profit"
+            if current is None:
                 continue
 
-            row_has_numbers = any(
-                isinstance(raw.iloc[row_idx, c], (int, float))
-                for c in month_col_indices
-            )
-            if not row_has_numbers:
-                continue
+            lowered = label.lower()
+            if lowered.startswith("margin %") or lowered.startswith("total margin %"):
+                continue  # derived ratio, not a figure
 
             for col_idx, month_label in zip(month_col_indices, month_labels):
                 val = raw.iloc[row_idx, col_idx]
-                if isinstance(val, (int, float)):
-                    sections.setdefault(current_section, []).append(
+                if isinstance(val, (int, float)) and not pd.isna(val):
+                    sections.setdefault(current, []).append(
                         {
-                            "Stream": label_raw.strip(),
+                            "Stream": label,
                             "Month": month_label,
                             "Value": float(val),
                             "MonthDate": month_sort_key(month_label),
+                            "IsTotal": lowered in _WIP_TOTAL_LABELS,
                         }
                     )
 
-        return {k: pd.DataFrame(v).sort_values("MonthDate") for k, v in sections.items() if v}
+        return {
+            key: pd.DataFrame(rows).sort_values("MonthDate")
+            for key, rows in sections.items()
+            if rows
+        }
 
     except Exception:  # noqa: BLE001
         return {}
+
+
+def assess_wip_margin(
+    sections: dict[str, pd.DataFrame],
+    cons_long: pd.DataFrame | None = None,
+) -> WipMarginQuality:
+    """Decide whether the parsed sheet can honestly be reported from.
+
+    Two independent checks, both of which the current workbook fails:
+
+    1. **Costs allocated?** Section B is entirely zero, so every "margin" in
+       section C is just revenue again and every margin % is 100%.
+    2. **Do the periods line up?** The sheet's own Total Revenue row is compared
+       against Consolidated Total Gross Revenue for the same month. The columns
+       are labelled Jan-26..Jun-26 but hold Jan-2024..Jun-2024 figures, so this
+       catches a 24-month formula offset that no amount of correct parsing
+       would fix.
+    """
+    cogs = sections.get("cogs", pd.DataFrame())
+    if cogs.empty:
+        unallocated, allocated = 0.0, False
+    else:
+        detail = cogs[~cogs.get("IsTotal", False)] if "IsTotal" in cogs else cogs
+        unallocated = float(detail["Value"].abs().sum())
+        allocated = unallocated > 0
+
+    mismatch: dict[str, tuple[float, float]] = {}
+    revenue = sections.get("revenue", pd.DataFrame())
+    if cons_long is not None and not cons_long.empty and not revenue.empty:
+        totals = revenue[revenue.get("IsTotal", False)] if "IsTotal" in revenue else revenue
+        for _, row in totals.iterrows():
+            expected = cons_long[
+                (cons_long["Metric"] == "Total Gross Revenue")
+                & (cons_long["Month"] == row["Month"])
+            ]["Value"].sum()
+            if expected and abs(expected - row["Value"]) > 1.0:
+                mismatch[str(row["Month"])] = (float(row["Value"]), float(expected))
+
+    return WipMarginQuality(
+        costs_allocated=allocated,
+        unallocated_cost=unallocated,
+        period_mismatch=mismatch,
+    )
 
 
 # ---------------------------------------------------------------------------

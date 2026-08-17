@@ -251,3 +251,48 @@ def test_client_names_are_stripped(sheets) -> None:
     master, _ = parse_master(sheets["MASTER"])
     names = master["Client (clean)"].dropna().astype(str)
     assert (names == names.str.strip()).all()
+
+
+# ---------------------------------------------------------------------------
+# WIP Margin by Stream — the live sheet is not fit to report from
+# ---------------------------------------------------------------------------
+
+def test_wip_margin_sheet_is_flagged_unusable(sheets, cons) -> None:
+    """Two faults in the workbook, either of which invalidates every margin.
+
+    If this test ever fails, the sheet has been fixed in Excel — check both
+    conditions, then let the tab render.
+    """
+    from streamlit_app.data.parsers import assess_wip_margin, parse_wip_margin
+
+    parsed = parse_wip_margin(sheets["WIP Margin by Stream"])
+    assert set(parsed) == {"revenue", "cogs", "margin", "check"}
+
+    quality = assess_wip_margin(parsed, cons)
+    assert quality.costs_allocated is False, (
+        "Section B now has cost allocated — good. Re-check the margins and "
+        "update this test."
+    )
+    assert len(quality.period_mismatch) == 6, (
+        "Column periods no longer disagree with the P&L — the 24-month formula "
+        "offset may have been fixed."
+    )
+    assert quality.usable is False
+
+
+def test_wip_margin_columns_hold_data_two_years_older_than_their_label(sheets, cons) -> None:
+    """Jan-26 column carries Jan 2024 figures. Documents the defect precisely."""
+    from streamlit_app.data.parsers import assess_wip_margin, parse_wip_margin
+
+    quality = assess_wip_margin(parse_wip_margin(sheets["WIP Margin by Stream"]), cons)
+    sheet_value, expected = quality.period_mismatch["Jan 2026"]
+    assert expected == pytest.approx(4_010_178_131, abs=TOL)   # Jan 2026, correct
+    assert sheet_value == pytest.approx(1_196_856_516, abs=TOL)  # Jan 2024, what's there
+
+
+def test_margin_rows_are_not_filed_as_costs(sheets) -> None:
+    from streamlit_app.data.parsers import parse_wip_margin
+
+    parsed = parse_wip_margin(sheets["WIP Margin by Stream"])
+    assert "3PL Deliveries Margin" in set(parsed["margin"]["Stream"])
+    assert "3PL Deliveries Margin" not in set(parsed["cogs"]["Stream"])

@@ -19,8 +19,9 @@ from streamlit_app.components.filters import (
 )
 from streamlit_app.components.kpi_cards import render_single_kpi
 from streamlit_app.components.ui import render_page_header, render_section_header, render_section_safe
-from streamlit_app.constants import fmt_idr
-from streamlit_app.data.parsers import parse_wip_margin
+from streamlit_app.constants import BLITZ_COLORS, fmt_idr
+from streamlit_app.data.parsers import assess_wip_margin, parse_pl_sheet, parse_wip_margin
+from streamlit_app.constants import fmt_idr_full
 
 
 def render(sheets: dict[str, pd.DataFrame]) -> None:
@@ -38,6 +39,16 @@ def render(sheets: dict[str, pd.DataFrame]) -> None:
     sections = parse_wip_margin(raw)
     if not sections:
         st.warning("Could not parse any data from the 'WIP Margin by Stream' sheet.")
+        return
+
+    # Before rendering anything, establish whether this sheet can be reported
+    # from at all. It is named WIP for a reason, and presenting its figures
+    # inside a dashboard lends them an authority they have not earned.
+    _cons_raw = sheets.get("Consolidated Summary")
+    _cons_long = parse_pl_sheet(_cons_raw, "Consolidated") if _cons_raw is not None else None
+    quality = assess_wip_margin(sections, _cons_long)
+    if not quality.usable:
+        _render_unusable(quality)
         return
 
     revenue_df = sections.get("revenue", pd.DataFrame())
@@ -195,3 +206,73 @@ def _render_margin_charts(
         y_format="pct",
     )
     render_plotly_chart(fig)
+
+
+# ---------------------------------------------------------------------------
+# Refusal path
+# ---------------------------------------------------------------------------
+
+def _render_unusable(quality) -> None:
+    """Explain why no margins are shown, instead of showing wrong ones.
+
+    Rendering this sheet as-is would put "3PL Deliveries margin: 100%" on a
+    board-facing dashboard. Both faults below are in the workbook, not the
+    dashboard, so the fix belongs in Excel — but until it lands, silence with
+    an explanation beats a confident wrong number.
+    """
+    problems: list[tuple[str, str]] = []
+
+    if not quality.costs_allocated:
+        problems.append((
+            "No cost has been allocated to any stream",
+            "Section B (Cost of Revenue by Stream) is zero for every stream in "
+            "every period, so section C is just revenue restated and each stream "
+            "reads a 100% margin. The sheet's own check row agrees — it reports "
+            "the entire group COGS as unallocated.",
+        ))
+
+    if quality.period_mismatch:
+        months = sorted(quality.period_mismatch)
+        first = months[0]
+        sheet_value, expected = quality.period_mismatch[first]
+        problems.append((
+            f"Column periods do not match their data ({len(months)} month(s))",
+            f"The column labelled {first} totals {fmt_idr_full(sheet_value)}, but "
+            f"{first} in the Consolidated P&L is {fmt_idr_full(expected)}. The "
+            f"figures correspond to two years earlier, so the formulas are "
+            f"reading the wrong columns.",
+        ))
+
+    st.markdown(
+        f"""
+        <div style='background:#FFEBE9;border:2px solid #CF222E;border-radius:12px;
+            padding:18px 24px;margin-bottom:18px;'>
+          <div style='font-size:11px;font-weight:700;letter-spacing:0.1em;
+            text-transform:uppercase;color:#CF222E;'>Not reportable</div>
+          <div style='font-size:17px;font-weight:800;color:#CF222E;margin-top:2px;'>
+            Margins are hidden because this sheet would misstate them</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    for title, detail in problems:
+        st.markdown(
+            f"""
+            <div style='background:{BLITZ_COLORS['off_white']};
+                border:1px solid {BLITZ_COLORS['border']};border-left:4px solid #CF222E;
+                border-radius:8px;padding:12px 18px;margin-bottom:10px;'>
+              <div style='font-size:13px;font-weight:700;
+                color:{BLITZ_COLORS['text_primary']};'>{title}</div>
+              <div style='font-size:12px;color:{BLITZ_COLORS['text_secondary']};
+                line-height:1.6;margin-top:4px;'>{detail}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.caption(
+        "Both faults are in the 'WIP Margin by Stream' worksheet, not in this "
+        "dashboard. Once costs are allocated per stream and the column formulas "
+        "point at the right periods, this tab will populate on the next refresh."
+    )
