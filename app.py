@@ -11,6 +11,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from streamlit_app.auth import render_account_control, require_login
 from streamlit_app.components.filters import (
     render_sidebar_filters,
     render_sidebar_global_filters,
@@ -71,6 +72,15 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 apply_global_visual_system()
+
+# ---------------------------------------------------------------------------
+# Sign-in gate
+# ---------------------------------------------------------------------------
+# Deliberately the first thing after page setup and BEFORE any source is built.
+# Everything below runs only for a signed-in Blitz account; require_login()
+# ends the script for anyone else, so an unauthenticated visitor never reaches
+# code that holds SharePoint credentials. A no-op when [auth] is unconfigured.
+require_login()
 
 # ---------------------------------------------------------------------------
 # Sidebar — branding
@@ -365,6 +375,10 @@ with st.sidebar:
         st.session_state["currency"] = "IDR"
     
     sync_url_from_state(_global_months)
+
+    # Who is signed in (nothing when [auth] is unconfigured)
+    with st.sidebar:
+        render_account_control()
 
     # AI status indicator
     st.sidebar.divider()
