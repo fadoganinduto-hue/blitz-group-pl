@@ -253,7 +253,7 @@ def test_no_real_client_secret_is_written_into_the_docs():
     """
     placeholders = ("the-secret", "the-64-character", "paste", "your-", "xxx", "<")
 
-    for name in ("STREAMLIT_CLOUD.md", "README.md", ".env.azure.example"):
+    for name in ("STREAMLIT_CLOUD.md", "QUICKSTART.md"):
         text = (ROOT / "deploy" / name).read_text()
         for line in text.splitlines():
             stripped = line.strip()

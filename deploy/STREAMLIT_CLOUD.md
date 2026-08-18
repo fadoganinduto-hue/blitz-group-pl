@@ -5,9 +5,9 @@ The lighter option. No Azure subscription, no IT ticket, no `az` CLI — but
 you can point it at Microsoft Entra and get the same "sign in with your Blitz
 account" experience, in about twenty minutes.
 
-Read `deploy/README.md` too. The one thing this option cannot give you is
-control over where the SharePoint credential lives — see "What you're accepting"
-at the bottom, and make that call deliberately rather than by default.
+The one thing this option cannot give you is control over where the SharePoint
+credential lives — see "What you're accepting" at the bottom, and make that
+call deliberately rather than by default.
 
 ---
 
