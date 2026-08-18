@@ -35,15 +35,52 @@ def month_sort_key(month_label: str) -> pd.Timestamp:
 def _detect_month_cols(
     raw: pd.DataFrame, header_row_idx: int
 ) -> list[int]:
-    """Return column indices whose header-row value looks like a month string."""
+    """Return the columns of the P&L's own month grid — and nothing else.
+
+    Scanning the whole header row for anything month-shaped is not safe. Blitz
+    Summary carries a "Top Clients Monthly" side table pasted to the right of
+    the P&L, at columns 41-46, under its own ``Jan 2026 … Jun 2026`` header. A
+    naive scan returned 42 columns for 36 months, so six months of 2026 were
+    read twice: once from the P&L, and once from whatever client figure happened
+    to sit on the same spreadsheet row.
+
+    The cost of that was not small. Row 8 is "Total Gross Revenue" in the P&L
+    and TikTok's monthly revenue in the side table, so Blitz Jun 2026 revenue
+    was reported as Rp3,661,974,619 against a true Rp2,968,578,119 — the
+    Rp693,396,500 gap being TikTok's June revenue, read as if it were P&L.
+
+    Two independent rules, either of which alone closes it:
+
+    * **Contiguity.** The P&L grid is an unbroken run of month columns. Stop at
+      the first non-month column once the run has started; a side table is
+      always separated from it by at least one blank or titled column.
+    * **Uniqueness.** A month may appear once. The leftmost band wins, because
+      the P&L is authored first and side tables are appended to its right.
+    """
     header = raw.iloc[header_row_idx]
     cols: list[int] = []
+    seen: set[str] = set()
+    started = False
+
     for col_idx in range(2, len(raw.columns)):
         val = header.iloc[col_idx]
-        if isinstance(val, str) and val.strip() and month_sort_key(val.strip()) is not pd.NaT:
-            cols.append(col_idx)
-        elif hasattr(val, "strftime"):  # datetime object from openpyxl
-            cols.append(col_idx)
+        if hasattr(val, "strftime"):  # datetime object from openpyxl
+            label = val.strftime("%b %Y")
+        elif isinstance(val, str) and val.strip() and month_sort_key(val.strip()) is not pd.NaT:
+            label = val.strip()
+        else:
+            # A break in the run ends the grid. Leading blanks before the first
+            # month column are tolerated.
+            if started:
+                break
+            continue
+
+        started = True
+        if label in seen:
+            continue
+        seen.add(label)
+        cols.append(col_idx)
+
     return cols
 
 

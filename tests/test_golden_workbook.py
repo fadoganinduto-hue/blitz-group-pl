@@ -314,11 +314,19 @@ def test_detail_sheets_expose_revenue_under_the_canonical_name(sheets) -> None:
     assert value == pytest.approx(2_560_844_299, abs=TOL)
 
 
-def test_blitz_summary_and_detail_disagree_on_revenue(sheets) -> None:
-    """A real workbook inconsistency, pinned so it cannot pass unnoticed.
+def test_blitz_summary_and_detail_agree_on_revenue(sheets) -> None:
+    """They agree. An earlier version of this file asserted that they did not.
 
-    Toggling granularity on the Entity tab changes Blitz Jun 2026 revenue by
-    Rp693M. If this test starts failing, the sheets have been reconciled.
+    That earlier assertion — Blitz Jun 2026 revenue Rp3,661,974,619 on Summary
+    against Rp2,968,578,119 on Detail — was reported to Finance as a workbook
+    inconsistency to go and fix. It was not one. The Rp693,396,500 gap was
+    TikTok's June revenue, read out of the "Top Clients Monthly" side table
+    pasted to the right of the Blitz P&L, whose own Jan-Jun 2026 header the
+    column detector was matching. See ``_detect_month_cols``.
+
+    A golden test can pin a defect in the parser just as easily as one in the
+    workbook. This one is kept pointing at the same figure, now asserting the
+    agreement, so the side table cannot creep back in.
     """
     from streamlit_app.data.reconciliation import summary_vs_detail
 
@@ -326,11 +334,89 @@ def test_blitz_summary_and_detail_disagree_on_revenue(sheets) -> None:
                  for e in ("Blitz", "Borzo", "TheLorry")}
     details = {e: parse_pl_sheet(sheets[f"{e} Detail"], e)
                for e in ("Blitz", "Borzo", "TheLorry")}
-    out = summary_vs_detail(summaries, details)
 
-    assert not out.empty
-    assert set(out["Entity"]) == {"Blitz"}, "only Blitz should disagree"
-    jun = out[out["Month"] == "Jun 2026"].iloc[0]
-    assert jun["Summary"] == pytest.approx(3_661_974_619, abs=TOL)
-    assert jun["Detail"] == pytest.approx(2_968_578_119, abs=TOL)
-    assert jun["Delta"] == pytest.approx(693_396_500, abs=TOL)
+    assert summary_vs_detail(summaries, details).empty
+
+    jun = summaries["Blitz"]
+    value = jun[(jun["Metric"] == "Total Gross Revenue")
+                & (jun["Month"] == "Jun 2026")]["Value"].sum()
+    assert value == pytest.approx(2_968_578_119, abs=TOL)
+
+
+# ---------------------------------------------------------------------------
+# The "Top Clients Monthly" side table must not be read as P&L
+# ---------------------------------------------------------------------------
+
+def test_blitz_summary_month_grid_stops_before_the_side_table(sheets) -> None:
+    """36 months, one column each — not 42 columns for 36 months."""
+    from collections import Counter
+    from streamlit_app.data.parsers import _detect_month_cols, _header_label
+
+    raw = sheets["Blitz Summary"]
+    cols = _detect_month_cols(raw, 1)
+    labels = [_header_label(raw, 1, c) for c in cols]
+
+    assert len(cols) == 36
+    assert not [m for m, n in Counter(labels).items() if n > 1]
+    assert max(cols) < 40, "reached into the Top Clients Monthly block"
+    assert cols == list(range(min(cols), min(cols) + 36)), "grid must be contiguous"
+
+
+_REPORTED_METRICS = (
+    "Total Gross Revenue", "Net Revenue", "Total COGS", "Gross Profit 1",
+    "Gross Profit 2", "Total Operating Expenses", "EBITDA",
+    "NET PROFIT/LOSS (Before Tax)",
+)
+
+
+def test_every_reported_metric_month_appears_once_per_entity(sheets) -> None:
+    """A duplicated month column silently doubles whatever shares its row.
+
+    Scoped to the metrics the tabs actually report. The sheets do reuse a few
+    labels across sections ("Gross Margins", "(spare OI&E 3)"), which is
+    untidy but harmless — nothing reads them.
+    """
+    for entity in ("Blitz", "Borzo", "TheLorry"):
+        for kind in ("Summary", "Detail"):
+            df = parse_pl_sheet(sheets[f"{entity} {kind}"], entity)
+            df = df[df["Metric"].isin(_REPORTED_METRICS)]
+            counts = df.groupby(["Metric", "Month"]).size()
+            if counts.empty:
+                continue
+            assert counts.max() == 1, f"{entity} {kind}: {counts.idxmax()} appears twice"
+
+
+def test_ratio_rows_do_not_masquerade_as_currency(sheets) -> None:
+    """"Gross Margins" holds -0.115, not rupiah. It must not reach the charts."""
+    for entity in ("Blitz", "Borzo", "TheLorry"):
+        metrics = set(parse_pl_sheet(sheets[f"{entity} Detail"], entity)["Metric"])
+        assert "Gross Margins" not in metrics
+        assert "Operating Margin" not in metrics
+
+
+def test_tiktok_memo_revenue_is_not_added_to_blitz(sheets) -> None:
+    """Pinned to the rupiah, because this reached the screen.
+
+    Blitz Jun 2026 revenue was shown as Rp3.66B when the P&L says Rp2.97B, and
+    the July figure then read as a 4.6% decline when revenue had in fact grown
+    17.7%. The overstatement equals TikTok's own monthly revenue exactly.
+    """
+    blitz = parse_pl_sheet(sheets["Blitz Summary"], "Blitz")
+    revenue = blitz[blitz["Metric"] == "Total Gross Revenue"]
+    by_month = revenue.groupby("Month")["Value"].sum()
+
+    expected = {
+        "Feb 2026": 2_641_230_164,
+        "Mar 2026": 2_374_987_783,
+        "Apr 2026": 2_560_844_299,
+        "May 2026": 2_738_327_449,
+        "Jun 2026": 2_968_578_119,
+        "Jul 2026": 3_492_694_313,
+    }
+    for month, value in expected.items():
+        assert by_month[month] == pytest.approx(value, abs=TOL), month
+
+    # July was never inflated — the side table stops at Jun — so an inflated
+    # June manufactured a decline out of a 17.7% rise.
+    growth = by_month["Jul 2026"] / by_month["Jun 2026"] - 1
+    assert growth == pytest.approx(0.177, abs=0.002)

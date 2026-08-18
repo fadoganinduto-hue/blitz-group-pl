@@ -41,6 +41,12 @@ SKIP_LABELS: frozenset[str] = frozenset(
         "ebitda margin %",
         "gross margin %",
         "net margin %",
+        # Ratio rows whose labels carry no "%". They hold fractions (-0.115),
+        # so without these the Entity tab offers "Gross Margins" in its metric
+        # dropdown and draws a flat line at Rp0 for it.
+        "gross margins",
+        "operating margin",
+        "ebitda %",
     }
 )
 

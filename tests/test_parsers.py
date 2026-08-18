@@ -261,3 +261,65 @@ class TestParseTieOut:
 
         result = parse_tie_out(pd.DataFrame())
         assert result.empty
+
+
+# ---------------------------------------------------------------------------
+# Month-column detection — the P&L grid, and nothing pasted beside it
+# ---------------------------------------------------------------------------
+
+def _sheet_with(header: list, rows: list[tuple]) -> pd.DataFrame:
+    """Build a raw sheet shaped like the real ones.
+
+    Row 0 is the header: "In IDR" in column 1, month labels from column 2.
+    Subsequent rows carry a label in column 1 and values from column 2.
+    """
+    grid = [[None, "In IDR"] + header]
+    for label, values in rows:
+        grid.append([None, label] + values)
+    return pd.DataFrame(grid)
+
+
+def test_month_grid_is_contiguous():
+    """A side table to the right is separated by at least one blank column."""
+    from streamlit_app.data.parsers import _detect_month_cols
+
+    raw = _sheet_with(
+        ["Jan 2026", "Feb 2026", None, "Top Clients", "Jan 2026", "Feb 2026"],
+        [],
+    )
+    assert _detect_month_cols(raw, 0) == [2, 3]
+
+
+def test_a_repeated_month_label_is_taken_once():
+    """Belt and braces: uniqueness closes it even without the blank column."""
+    from streamlit_app.data.parsers import _detect_month_cols
+
+    raw = _sheet_with(
+        ["Jan 2026", "Feb 2026", "Jan 2026", "Feb 2026"],
+        [],
+    )
+    assert _detect_month_cols(raw, 0) == [2, 3]
+
+
+def test_leading_blank_columns_before_the_grid_are_tolerated():
+    from streamlit_app.data.parsers import _detect_month_cols
+
+    raw = _sheet_with([None, "Jan 2026", "Feb 2026"], [])
+    assert _detect_month_cols(raw, 0) == [3, 4]
+
+
+def test_a_side_table_value_is_never_read_as_a_pl_figure():
+    """End to end: the exact shape of the Blitz Summary defect, in miniature."""
+    from streamlit_app.data.parsers import parse_pl_sheet
+
+    raw = _sheet_with(
+        ["Jan 2026", "Feb 2026", None, "Top Clients Monthly", "Jan 2026", "Feb 2026"],
+        [
+            ("Total Gross Revenue", [2_000_000_000, 2_400_000_000,
+                                     None, None, 50_000_000, 693_396_500]),
+        ],
+    )
+    parsed = parse_pl_sheet(raw, "Blitz")
+    by_month = parsed.groupby("Month")["Value"].sum()
+    assert by_month["Feb 2026"] == 2_400_000_000    # not 3,093,396,500
+    assert len(parsed) == 2
