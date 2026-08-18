@@ -131,6 +131,59 @@ def month_on_month(
     return frame.sort_values(["MonthDate", group_col]).reset_index(drop=True)[_COLUMNS]
 
 
+def mom_matrix(
+    mom: pd.DataFrame,
+    fmt_value,
+    *,
+    months: list[str] | None = None,
+    group_col: str = "Entity",
+) -> pd.DataFrame:
+    """Return an Entity x Month table of ``"+Rp207M (+7.8%)"`` cells.
+
+    The chart answers "which months moved". The table is what gets pasted into
+    a deck or read down a column, so it carries the rupiah and the percentage
+    together — a bar height is not a number anyone can quote.
+
+    ``fmt_value`` formats a positive magnitude; pass the tab's own currency
+    formatter so the table follows the IDR/USD toggle. Cells with no comparable
+    prior month read "—"; cells whose percentage was withheld carry the rupiah
+    and "(n/a)".
+    """
+    if mom is None or mom.empty or "Delta" not in mom.columns:
+        return pd.DataFrame()
+
+    ordered = (
+        list(months)
+        if months is not None
+        else mom.drop_duplicates("Month").sort_values("MonthDate")["Month"].tolist()
+    )
+    present = set(mom["Month"])
+    ordered = [m for m in ordered if m in present]
+    if not ordered:
+        return pd.DataFrame()
+
+    cells: dict[str, dict[str, str]] = {}
+    for row in mom.itertuples():
+        delta, pct = row.Delta, row.Pct
+        # A zero change off a base that could not carry a percentage is a month
+        # the entity was not trading. "+Rp0 (n/a)" is true and pure noise; three
+        # of those across TheLorry's pre-launch quarter crowd out the real ones.
+        dormant = (
+            not pd.isna(delta) and delta == 0 and not getattr(row, "Comparable", True)
+        )
+        if pd.isna(delta) or dormant:
+            text = "—"
+        else:
+            body = f"{'+' if delta >= 0 else '−'}{fmt_value(abs(delta))}"
+            text = f"{body} ({pct:+.1%})" if pd.notna(pct) else f"{body} (n/a)"
+        cells.setdefault(getattr(row, group_col), {})[row.Month] = text
+
+    table = pd.DataFrame.from_dict(cells, orient="index")
+    table = table.reindex(columns=ordered).fillna("—")
+    table.index.name = group_col
+    return table.reset_index()
+
+
 def momentum_caveats(mom: pd.DataFrame) -> list[str]:
     """Return one plain sentence per reason a month carries no MoM figure.
 

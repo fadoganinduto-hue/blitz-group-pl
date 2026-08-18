@@ -261,3 +261,129 @@ def test_empty_input_returns_an_empty_frame_not_an_exception(df):
 def test_unknown_metric_returns_empty():
     df = _long([("Blitz", "Jan 2026", 2 * BN), ("Blitz", "Feb 2026", 3 * BN)])
     assert month_on_month(df, "Nonexistent Metric").empty
+
+
+# ---------------------------------------------------------------------------
+# The table form
+# ---------------------------------------------------------------------------
+
+def _fmt(value: float) -> str:
+    """Stand-in for the tab's currency formatter (positive magnitudes only)."""
+    if value >= 1_000_000_000:
+        return f"Rp{value / 1_000_000_000:,.1f}B"
+    if value >= 1_000_000:
+        return f"Rp{value / 1_000_000:,.0f}M"
+    return f"Rp{value:,.0f}"
+
+
+def test_matrix_is_one_row_per_entity_and_one_column_per_month():
+    from streamlit_app.data.momentum import mom_matrix
+
+    df = _long([
+        ("Blitz", "Jan 2026", 2 * BN), ("Borzo", "Jan 2026", 1 * BN),
+        ("Blitz", "Feb 2026", 2.5 * BN), ("Borzo", "Feb 2026", 1.1 * BN),
+        ("Blitz", "Mar 2026", 2.4 * BN), ("Borzo", "Mar 2026", 1.3 * BN),
+    ])
+    table = mom_matrix(month_on_month(df, "Total Gross Revenue"), _fmt)
+
+    assert list(table.columns) == ["Entity", "Jan 2026", "Feb 2026", "Mar 2026"]
+    assert set(table["Entity"]) == {"Blitz", "Borzo"}
+
+
+def test_a_cell_carries_the_rupiah_and_the_percentage():
+    """A bar height is not a number anyone can quote in a meeting."""
+    from streamlit_app.data.momentum import mom_matrix
+
+    df = _long([("Blitz", "Jan 2026", 2 * BN), ("Blitz", "Feb 2026", 2.5 * BN)])
+    table = mom_matrix(month_on_month(df, "Total Gross Revenue"), _fmt)
+    assert table.loc[0, "Feb 2026"] == "+Rp500M (+25.0%)"
+
+
+def test_a_negative_change_is_signed_in_the_cell():
+    from streamlit_app.data.momentum import mom_matrix
+
+    df = _long([("Blitz", "Jan 2026", 2.5 * BN), ("Blitz", "Feb 2026", 2 * BN)])
+    table = mom_matrix(month_on_month(df, "Total Gross Revenue"), _fmt)
+    cell = table.loc[0, "Feb 2026"]
+    assert cell.startswith("−") and "(-20.0%)" in cell
+
+
+def test_a_withheld_percentage_reads_n_a_not_blank():
+    """Blank reads as zero. The rupiah is still real and still shown."""
+    from streamlit_app.data.momentum import mom_matrix
+
+    df = _long([
+        ("TheLorry", "Jan 2026", 2 * MN),
+        ("TheLorry", "Feb 2026", 200 * MN),
+    ])
+    table = mom_matrix(month_on_month(df, "Total Gross Revenue"), _fmt)
+    assert table.loc[0, "Feb 2026"] == "+Rp198M (n/a)"
+
+
+def test_a_month_with_no_comparable_prior_reads_as_a_dash():
+    from streamlit_app.data.momentum import mom_matrix
+
+    df = _long([("Blitz", "Jan 2026", 2 * BN), ("Blitz", "Feb 2026", 2.5 * BN)])
+    table = mom_matrix(month_on_month(df, "Total Gross Revenue"), _fmt)
+    assert table.loc[0, "Jan 2026"] == "—"
+
+
+def test_matrix_columns_follow_the_caller_s_month_order():
+    """Alphabetical column order would put Apr before Jan."""
+    from streamlit_app.data.momentum import mom_matrix
+
+    df = _long([
+        ("Blitz", "Jan 2026", 2 * BN), ("Blitz", "Feb 2026", 2.2 * BN),
+        ("Blitz", "Mar 2026", 2.4 * BN), ("Blitz", "Apr 2026", 2.6 * BN),
+    ])
+    mom = month_on_month(df, "Total Gross Revenue")
+    months = ["Feb 2026", "Mar 2026", "Apr 2026"]
+    table = mom_matrix(mom, _fmt, months=months)
+    assert list(table.columns) == ["Entity"] + months
+
+
+def test_an_entity_absent_from_a_month_gets_a_dash_not_a_gap():
+    from streamlit_app.data.momentum import mom_matrix
+
+    df = _long([
+        ("Blitz", "Jan 2026", 2 * BN), ("Blitz", "Feb 2026", 2.5 * BN),
+        ("Blitz", "Mar 2026", 2.6 * BN),
+        ("Borzo", "Mar 2026", 1 * BN),
+    ])
+    table = mom_matrix(month_on_month(df, "Total Gross Revenue"), _fmt)
+    borzo = table[table["Entity"] == "Borzo"].iloc[0]
+    assert borzo["Feb 2026"] == "—"
+
+
+def test_matrix_of_nothing_is_empty_not_an_exception():
+    from streamlit_app.data.momentum import mom_matrix
+
+    assert mom_matrix(pd.DataFrame(), _fmt).empty
+    assert mom_matrix(None, _fmt).empty
+
+
+def test_a_dormant_month_reads_as_a_dash_not_plus_zero():
+    """TheLorry's pre-launch quarter: three "+Rp0 (n/a)" cells crowd out the
+    months that actually moved."""
+    from streamlit_app.data.momentum import mom_matrix
+
+    df = _long([
+        ("TheLorry", "Jan 2026", 0.0), ("TheLorry", "Feb 2026", 0.0),
+        ("TheLorry", "Mar 2026", 150 * MN), ("TheLorry", "Apr 2026", 180 * MN),
+        # Something has to be trading for the months to count as closed.
+        ("Blitz", "Jan 2026", 2 * BN), ("Blitz", "Feb 2026", 2 * BN),
+        ("Blitz", "Mar 2026", 2 * BN), ("Blitz", "Apr 2026", 2 * BN),
+    ])
+    table = mom_matrix(month_on_month(df, "Total Gross Revenue"), _fmt)
+    lorry = table[table["Entity"] == "TheLorry"].iloc[0]
+    assert lorry["Feb 2026"] == "—"
+    assert lorry["Mar 2026"].startswith("+Rp150M")
+
+
+def test_a_real_flat_month_is_not_hidden():
+    """Rp2B then Rp2B is a genuine zero change and must be reported as one."""
+    from streamlit_app.data.momentum import mom_matrix
+
+    df = _long([("Blitz", "Jan 2026", 2 * BN), ("Blitz", "Feb 2026", 2 * BN)])
+    table = mom_matrix(month_on_month(df, "Total Gross Revenue"), _fmt)
+    assert table.loc[0, "Feb 2026"] == "+Rp0 (+0.0%)"

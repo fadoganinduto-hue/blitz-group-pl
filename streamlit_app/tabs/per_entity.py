@@ -30,7 +30,7 @@ from streamlit_app.constants import (
 )
 from streamlit_app.data.parsers import parse_pl_sheet, parse_ratios
 from streamlit_app.data.analytics import compute_yoy_comparison
-from streamlit_app.data.momentum import month_on_month, momentum_caveats
+from streamlit_app.data.momentum import mom_matrix, month_on_month, momentum_caveats
 
 # Metrics shown in the ranking table
 _RANKING_METRICS: list[str] = [
@@ -324,16 +324,43 @@ def _render_mom(
     for note in momentum_caveats(mom):
         st.caption(f":material/info: {note}")
 
-    with st.expander("Month-on-month figures"):
-        table = mom[mom["Delta"].notna()][
-            ["Entity", "Month", "Prior", "Value", "Delta", "Pct"]
+    # The same figures as a table. A bar height is not a number anyone can
+    # quote in a meeting; this is the version that gets read down a column.
+    matrix = mom_matrix(mom, fmt_display, months=months_present)
+    if not matrix.empty:
+        st.dataframe(matrix, hide_index=True, width="stretch")
+        st.caption(
+            "Change in rupiah, with the percentage in brackets. "
+            "“n/a” is a withheld percentage, not a missing figure."
+        )
+
+    with st.expander("Full working — prior month, this month, change"):
+        detail = mom[mom["Delta"].notna()][
+            ["Entity", "Month", "Prior", "Value", "Delta", "Pct", "Basis"]
         ].copy()
-        table["Prior"] = table["Prior"].map(fmt_display)
-        table["Value"] = table["Value"].map(fmt_display)
-        table["Delta"] = table["Delta"].map(lambda v: f"{'+' if v >= 0 else '−'}{fmt_display(abs(v))}")
-        table["Pct"] = table["Pct"].map(lambda p: f"{p:+.1%}" if pd.notna(p) else "—")
-        table.columns = ["Entity", "Month", "Prior month", "This month", "Change", "Change %"]
-        st.dataframe(table, hide_index=True, width="stretch")
+        export = detail.copy()   # unformatted, for the download
+        detail["Prior"] = detail["Prior"].map(fmt_display)
+        detail["Value"] = detail["Value"].map(fmt_display)
+        detail["Delta"] = detail["Delta"].map(
+            lambda v: f"{'+' if v >= 0 else '−'}{fmt_display(abs(v))}"
+        )
+        detail["Pct"] = detail["Pct"].map(lambda p: f"{p:+.1%}" if pd.notna(p) else "—")
+        detail.columns = [
+            "Entity", "Month", "Prior month", "This month", "Change", "Change %", "Basis",
+        ]
+        st.dataframe(detail, hide_index=True, width="stretch")
+        st.caption(
+            "Change = This month − Prior month.  "
+            "Change % = Change ÷ ABS(Prior month) — the absolute value is what "
+            "keeps an improving loss positive."
+        )
+        st.download_button(
+            "Download as CSV",
+            export.to_csv(index=False).encode("utf-8"),
+            file_name=f"mom_{metric.replace('/', '-').replace(' ', '_').lower()}.csv",
+            mime="text/csv",
+            key=f"mom_csv_{metric}",
+        )
 
 
 def _render_small_multiples(vis: pd.DataFrame, cat_orders: dict) -> None:
