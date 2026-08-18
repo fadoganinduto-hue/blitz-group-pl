@@ -13,6 +13,7 @@ import streamlit as st
 from streamlit_app.components.charts import (
     comparison_bar_chart,
     mini_line_chart,
+    mom_bar_chart,
     render_plotly_chart,
     trend_line_chart,
 )
@@ -29,6 +30,7 @@ from streamlit_app.constants import (
 )
 from streamlit_app.data.parsers import parse_pl_sheet, parse_ratios
 from streamlit_app.data.analytics import compute_yoy_comparison
+from streamlit_app.data.momentum import month_on_month, momentum_caveats
 
 # Metrics shown in the ranking table
 _RANKING_METRICS: list[str] = [
@@ -129,9 +131,16 @@ def render(sheets: dict[str, pd.DataFrame]) -> None:
     with col_mode:
         view_mode = st.segmented_control(
             "View",
-            options=["IDR", "% of Group"],
+            options=["IDR", "% of Group", "MoM change"],
             default="IDR",
             key="entity_view_mode",
+            help=(
+                "IDR — the level each month. "
+                "% of Group — each entity's share. "
+                "MoM change — how much each month moved against the one before, "
+                "so growth is readable across the whole range without stepping "
+                "the context month."
+            ),
         )
     with col_metric:
         per_entity_metrics = [set(df["Metric"].unique()) for df in entity_frames.values()]
@@ -148,11 +157,14 @@ def render(sheets: dict[str, pd.DataFrame]) -> None:
         )
 
     # ── Trend + bar side by side ─────────────────────────────────────────
-    col_trend, col_bar = st.columns(2, gap="medium")
-    with col_trend:
-        _render_entity_trend(vis, metric, view_mode, cat_orders, filtered_months, latest_month)
-    with col_bar:
-        _render_entity_bar(vis, metric, view_mode, latest_month)
+    if view_mode == "MoM change":
+        _render_mom(entity_long, metric, filtered_months, cat_orders)
+    else:
+        col_trend, col_bar = st.columns(2, gap="medium")
+        with col_trend:
+            _render_entity_trend(vis, metric, view_mode, cat_orders, filtered_months, latest_month)
+        with col_bar:
+            _render_entity_bar(vis, metric, view_mode, latest_month)
 
     # ── Small-multiples grid ─────────────────────────────────────────────
     _render_small_multiples(vis, cat_orders)
@@ -256,6 +268,72 @@ def _render_entity_bar(
         render_plotly_chart(fig)
     else:
         st.caption("No data for this metric in the latest month.")
+
+
+def _render_mom(
+    entity_long: pd.DataFrame,
+    metric: str,
+    filtered_months: list[str],
+    cat_orders: dict,
+) -> None:
+    """Decision: which months actually grew, and by how much?
+
+    The KPI cards answer this for one month. Reading a run of months meant
+    stepping the context month and writing the answers down. This renders the
+    whole series at once.
+
+    Deliberately fed ``entity_long`` (the full history) rather than the filtered
+    frame: the first month on screen should compare against the month before it,
+    not against nothing, even when the range slider starts there.
+    """
+    st.markdown(
+        f"<div style='font-size:12px;font-weight:600;color:{BLITZ_COLORS['text_secondary']};"
+        f"letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;'>"
+        f"Month-on-month change — {escape(metric)}</div>",
+        unsafe_allow_html=True,
+    )
+
+    mom = month_on_month(entity_long, metric, months=filtered_months)
+    if mom.empty or mom["Delta"].notna().sum() == 0:
+        st.caption(
+            "No month-on-month figures for this metric — the range holds fewer "
+            "than two closed months."
+        )
+        return
+
+    months_present = (
+        mom[mom["Delta"].notna()]
+        .drop_duplicates("Month")
+        .sort_values("MonthDate")["Month"]
+        .tolist()
+    )
+    fig = mom_bar_chart(
+        mom,
+        category_orders={"Month": months_present},
+        color_map=ENTITY_COLORS,
+    )
+    render_plotly_chart(fig)
+
+    st.caption(
+        "Each bar is that month minus the month before — not growth since the "
+        "start of the range. Percentages divide by the prior month's absolute "
+        "value, so an improving loss reads positive. Hatched bars are base "
+        "effects: the prior month is too small to support a percentage, so the "
+        "bar shows a starting point rather than growth."
+    )
+    for note in momentum_caveats(mom):
+        st.caption(f":material/info: {note}")
+
+    with st.expander("Month-on-month figures"):
+        table = mom[mom["Delta"].notna()][
+            ["Entity", "Month", "Prior", "Value", "Delta", "Pct"]
+        ].copy()
+        table["Prior"] = table["Prior"].map(fmt_display)
+        table["Value"] = table["Value"].map(fmt_display)
+        table["Delta"] = table["Delta"].map(lambda v: f"{'+' if v >= 0 else '−'}{fmt_display(abs(v))}")
+        table["Pct"] = table["Pct"].map(lambda p: f"{p:+.1%}" if pd.notna(p) else "—")
+        table.columns = ["Entity", "Month", "Prior month", "This month", "Change", "Change %"]
+        st.dataframe(table, hide_index=True, width="stretch")
 
 
 def _render_small_multiples(vis: pd.DataFrame, cat_orders: dict) -> None:

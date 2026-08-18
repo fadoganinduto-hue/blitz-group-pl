@@ -208,20 +208,38 @@ def _decimals_for(step: float, divisor: float) -> int:
     return 2
 
 
-def _financial_ticks(lo: float, hi: float, prefix: str) -> tuple[list[float], list[str]]:
-    """Return (tickvals, ticktext) for a currency axis spanning lo..hi."""
+def _financial_ticks(
+    lo: float,
+    hi: float,
+    prefix: str,
+    *,
+    include_zero: bool = True,
+) -> tuple[list[float], list[str], tuple[float, float] | None]:
+    """Return (tickvals, ticktext, range) for a currency axis spanning lo..hi.
+
+    ``include_zero`` forces the baseline into the lattice. Bars must be read
+    from zero — a truncated bar axis makes a 4% move look like a doubling — but
+    a revenue *line* pinned to zero flattens into a straight edge, so trends
+    keep the range their data actually occupies.
+
+    The range is returned because ticks and range have to agree: placing a tick
+    at −Rp0.5B while Plotly autoranges to −Rp0.31B renders bars below the zero
+    line with no negative label anywhere on the axis.
+    """
     import math
 
-    # Charts here are baselined at zero (bars literally, lines by convention),
-    # so the tick lattice must include it.
-    lo, hi = min(0.0, lo), max(0.0, hi)
+    if include_zero:
+        lo, hi = min(0.0, lo), max(0.0, hi)
+    elif hi > lo:
+        pad = (hi - lo) * 0.05
+        lo, hi = lo - pad, hi + pad
     span = hi - lo
     if span <= 0:
-        return [0.0], [f"{prefix}0"]
+        return [0.0], [f"{prefix}0"], None
 
     step = _nice_step(span / _TICK_TARGET)
     if step <= 0:
-        return [], []
+        return [], [], None
 
     # A 250M step under a 1.5B ceiling would label the gridlines "Rp0.25B".
     # Widening the step to 500M costs two gridlines and buys "Rp0.5B / Rp1.0B".
@@ -238,7 +256,7 @@ def _financial_ticks(lo: float, hi: float, prefix: str) -> tuple[list[float], li
     first = math.floor(lo / step)
     last = math.ceil(hi / step)
     if last - first > 40:  # pathological range; let Plotly cope
-        return [], []
+        return [], [], None
 
     vals = [round(i * step, 6) for i in range(first, last + 1)]
     text: list[str] = []
@@ -250,7 +268,7 @@ def _financial_ticks(lo: float, hi: float, prefix: str) -> tuple[list[float], li
         # column is harder to scan than "Rp0.5B / Rp1.0B / Rp1.5B".
         body = f"{abs(v) / divisor:,.{decimals}f}"
         text.append(f"{'-' if v < 0 else ''}{prefix}{body}{suffix}")
-    return vals, text
+    return vals, text, (vals[0], vals[-1])
 
 
 def _apply_financial_axis(fig: go.Figure, axis: str = "y") -> None:
@@ -267,13 +285,22 @@ def _apply_financial_axis(fig: go.Figure, axis: str = "y") -> None:
         update(tickprefix=prefix, tickformat="~s")
         return
 
-    vals, text = _financial_ticks(extent[0], extent[1], prefix)
+    # A bar is read as a length from zero; a line is read as a shape. Only the
+    # first has to keep the baseline on screen.
+    baselined = any(
+        getattr(t, "type", "") in ("bar", "waterfall", "histogram") for t in fig.data
+    )
+    vals, text, axis_range = _financial_ticks(
+        extent[0], extent[1], prefix, include_zero=baselined
+    )
     if not vals:
         update(tickprefix=prefix, tickformat="~s")
         return
 
     # tickprefix is carried in the text, so it must not be applied twice.
     update(tickprefix="", tickmode="array", tickvals=vals, ticktext=text)
+    if axis_range is not None:
+        update(range=list(axis_range))
 
 
 def _guard_category_labels(fig: go.Figure, n_categories: int, axis: str = "x") -> None:
@@ -573,6 +600,121 @@ def comparison_bar_chart(
     # Client, industry and stream names are long; without this the label band is
     # squeezed until labels render as "ce" / "als" / "ics".
     _guard_category_labels(fig, n_categories, axis=cat_axis)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Month-on-month movement bars
+# ---------------------------------------------------------------------------
+
+def mom_bar_chart(
+    df: pd.DataFrame,
+    *,
+    title: str = "",
+    category_orders: dict | None = None,
+    color_map: dict | None = None,
+    show_pct: bool = True,
+) -> go.Figure:
+    """Signed bars showing each month's change against the month before.
+
+    ``df`` comes from ``data.momentum.month_on_month``: Entity, Month, Delta,
+    Pct, Prior, Value, Basis.
+
+    Bars are coloured by entity, not by direction. The tab reads entity colour
+    everywhere else, and recolouring red/green here would give one swatch two
+    jobs on a single screen — direction is legible from the zero line without
+    spending the palette on it.
+
+    Bars whose percentage had to be withheld are hatched. Borzo's Jan 2026 bar
+    is +Rp1.26B because Borzo enters the P&L that month, not because it grew;
+    drawn solid it outsizes every genuine move on the chart and reads as the
+    best month anyone had. Each entity therefore gets up to two traces sharing
+    one ``offsetgroup`` — solid and hatched — so the legend swatch stays solid
+    and does not imply the whole entity is a base effect.
+    """
+    plot = df[df["Delta"].notna()].copy() if "Delta" in df.columns else df.copy()
+    has_entity = "Entity" in plot.columns
+    if not has_entity:
+        plot = plot.assign(Entity="Change")
+
+    colours = _resolved_color_map(plot, "Entity", color_map or ENTITY_COLORS)
+    prefix = _get_prefix()
+    known_pct = show_pct and {"Pct", "Prior"}.issubset(plot.columns)
+
+    months = (category_orders or {}).get("Month")
+    if not months:
+        months = (
+            plot.drop_duplicates("Month").sort_values("MonthDate")["Month"].tolist()
+            if "MonthDate" in plot.columns else list(dict.fromkeys(plot["Month"]))
+        )
+
+    hovertemplate = (
+        f"<b>%{{fullData.name}}</b><br>Change: {prefix}%{{y:,.0f}}"
+        "<br>Change %: %{customdata[0]}"
+        "<br>Prior month: %{customdata[1]}<extra></extra>"
+        if known_pct else
+        f"<b>%{{fullData.name}}</b><br>Change: {prefix}%{{y:,.0f}}<extra></extra>"
+    )
+
+    def _customdata(part: pd.DataFrame):
+        if not known_pct:
+            return None
+        return [
+            [
+                f"{pct:+.1%}" if pd.notna(pct) else "withheld — base too small",
+                _fmt_converted(prior) if pd.notna(prior) else "—",
+            ]
+            for pct, prior in zip(part["Pct"], part["Prior"])
+        ]
+
+    fig = go.Figure()
+    for entity in list(dict.fromkeys(plot["Entity"])):
+        subset = plot[plot["Entity"] == entity]
+        solid_rows = subset[subset["Pct"].notna()] if known_pct else subset
+        hatched_rows = subset[subset["Pct"].isna()] if known_pct else subset.iloc[0:0]
+
+        # An entity with nothing but base effects still belongs in the legend.
+        legend_on_hatched = solid_rows.empty and not hatched_rows.empty
+
+        for part, hatched in ((solid_rows, False), (hatched_rows, True)):
+            if part.empty:
+                continue
+            fig.add_trace(go.Bar(
+                name=entity,
+                x=part["Month"],
+                y=part["Delta"],
+                customdata=_customdata(part),
+                hovertemplate=hovertemplate,
+                marker=dict(
+                    color=colours.get(entity, BLITZ_COLORS["text_secondary"]),
+                    line=dict(width=0),
+                    pattern=dict(shape="/", solidity=0.35, size=6) if hatched else None,
+                ),
+                opacity=0.92,
+                offsetgroup=str(entity),
+                legendgroup=str(entity),
+                showlegend=(hatched == legend_on_hatched),
+            ))
+
+    _apply_base_layout(fig, title)
+    _apply_financial_axis(fig, axis="y")
+    # The zero line is what makes a signed bar chart readable; the base layout
+    # suppresses it everywhere else because levels never cross it.
+    fig.update_yaxes(
+        zeroline=True,
+        zerolinecolor=BLITZ_COLORS["text_secondary"],
+        zerolinewidth=1,
+        title="Change vs prior month",
+    )
+    _apply_xaxis_months(fig, len(months), months)
+    fig.update_xaxes(
+        title="", categoryorder="array", categoryarray=months,
+    )
+    fig.update_layout(
+        barmode="group", bargap=0.25,
+        showlegend=has_entity,
+        hovermode="x unified",
+    )
     return fig
 
 

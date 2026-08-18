@@ -420,3 +420,47 @@ def test_tiktok_memo_revenue_is_not_added_to_blitz(sheets) -> None:
     # June manufactured a decline out of a 17.7% rise.
     growth = by_month["Jul 2026"] / by_month["Jun 2026"] - 1
     assert growth == pytest.approx(0.177, abs=0.002)
+
+
+# ---------------------------------------------------------------------------
+# Month-on-month movement — cross-checked against the KPI cards
+# ---------------------------------------------------------------------------
+
+def test_mom_matches_the_figures_on_the_entity_kpi_cards(sheets) -> None:
+    """The MoM series must agree with the single-month MoM on the entity cards.
+
+    Borzo Apr 2026 reads -16.7% on the cards and here. Blitz reads +7.8%; the
+    cards showed +8.6% until the Top Clients side table was excluded from the
+    Blitz grid, and both figures move together because both are derived from
+    the same parsed frame.
+    """
+    from streamlit_app.data.momentum import BASIS_SMALL_BASE, month_on_month
+
+    frames = [parse_pl_sheet(sheets[f"{e} Summary"], e)
+              for e in ("Blitz", "Borzo", "TheLorry")]
+    mom = month_on_month(pd.concat(frames, ignore_index=True), "Total Gross Revenue")
+    apr = mom[mom["Month"] == "Apr 2026"].set_index("Entity")
+
+    assert apr.loc["Blitz", "Pct"] == pytest.approx(0.0783, abs=0.0005)
+    assert apr.loc["Blitz", "Delta"] == pytest.approx(185_856_516, abs=TOL)
+    assert apr.loc["Borzo", "Pct"] == pytest.approx(-0.1674, abs=0.0005)
+    assert apr.loc["Borzo", "Delta"] == pytest.approx(-246_844_959, abs=TOL)
+
+    # TheLorry starts trading in Apr 2026 — a percentage off a zero base would
+    # be infinite, so the rupiah is reported and the percentage withheld.
+    assert apr.loc["TheLorry", "Delta"] == pytest.approx(132_912_489, abs=TOL)
+    assert pd.isna(apr.loc["TheLorry", "Pct"])
+    assert apr.loc["TheLorry", "Basis"] == BASIS_SMALL_BASE
+
+
+def test_mom_never_reports_a_full_collapse_into_an_unclosed_month(sheets) -> None:
+    """Aug 2026 onward is an empty grid; comparing into it invents -100%."""
+    from streamlit_app.data.momentum import month_on_month
+
+    frames = [parse_pl_sheet(sheets[f"{e} Summary"], e)
+              for e in ("Blitz", "Borzo", "TheLorry")]
+    mom = month_on_month(pd.concat(frames, ignore_index=True), "Total Gross Revenue")
+    comparable = mom[mom["Comparable"]]
+    assert not comparable.empty
+    assert comparable["Pct"].min() > -0.95, "an unclosed month leaked into the base"
+    assert "Aug 2026" not in set(mom["Month"])
